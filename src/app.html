@@ -1,0 +1,2263 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SAN Management Platform</title>
+<!-- Bridge uses fetch() -- no qwebchannel needed -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          brand: { DEFAULT:'#3b7eff', dim:'#1a3a8033', hover:'#5a9bff' },
+          surface: { DEFAULT:'#13161e', 2:'#1a1e2a', 3:'#20253a' },
+          border:  { DEFAULT:'#252a3d', 2:'#2e3550' },
+          tx: { DEFAULT:'#dce3f0', dim:'#6b7899', muted:'#3d4560' },
+          ok:   { DEFAULT:'#1db954', dim:'#0d3d1f' },
+          warn: { DEFAULT:'#f0a500', dim:'#3d2a00' },
+          err:  { DEFAULT:'#e03e3e', dim:'#3d0f0f' },
+          purp: { DEFAULT:'#8b5cf6', dim:'#2d1a5e' },
+          cyan: { DEFAULT:'#06b6d4', dim:'#0c2d36' },
+        },
+        fontFamily: { sans: ['"Inter"','system-ui','sans-serif'] },
+      }
+    }
+  }
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  code, .mono { font-family: 'JetBrains Mono', monospace; }
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2e3550; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3d4560; }
+  .fade-in { animation: fadeIn .18s ease; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+  .spin { animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Table hover */
+  tbody tr:hover { background: #1a1e2a !important; }
+  /* Light mode overrides */
+  .light body, html.light { background-color: #f4f6fb !important; color: #1a2035 !important; }
+  .light .bg-\[\#0d0f14\] { background-color: #f4f6fb !important; }
+  .light .bg-surface { background-color: #ffffff !important; }
+  .light .bg-surface-2 { background-color: #eef1f8 !important; }
+  .light .bg-surface-3 { background-color: #e4e9f5 !important; }
+  .light .border-border { border-color: #d8dff0 !important; }
+  .light .text-tx { color: #1a2035 !important; }
+  .light .text-tx-dim { color: #6b7ba8 !important; }
+  .light .text-tx-muted { color: #a0adc8 !important; }
+  .light #Sidebar, .light aside { background-color: #ffffff !important; }
+  html.light { background-color: #f4f6fb; }
+  /* Scrollbar light */
+  .light ::-webkit-scrollbar-thumb { background: #c8d2ea; }
+  .light tbody tr:hover { background: #eef1f8 !important; }
+
+  /* Ensure root elements fill the WebEngine viewport completely */
+  html, body {
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+  }
+</style>
+</head>
+<body class="bg-[#0d0f14] text-tx" style="width:100%;height:100%;margin:0;padding:0;overflow:hidden;">
+
+<!-- -----------------------------------------------------------
+     LOGIN SCREEN
+------------------------------------------------------------ -->
+<div id="login-screen" class="fixed inset-0 flex items-center justify-center bg-[#0d0f14] z-50" style="width:100%;height:100%;">
+  <div class="flex w-full h-full">
+    <!-- Left panel -->
+    <div class="hidden md:flex flex-1 flex-col items-center justify-center bg-gradient-to-br from-[#0d0f14] via-[#0f1520] to-[#0d0f14] p-12">
+      <div class="text-brand text-6xl mb-6"></div>
+      <h1 class="text-3xl font-bold text-tx mb-2 tracking-tight">SAN Management Platform</h1>
+      <p class="text-tx-dim text-sm text-center max-w-xs">Cisco MDS 9000 . FC Zoning . SFP Health . Port Analytics</p>
+      <div class="mt-10 grid grid-cols-2 gap-4 text-xs text-tx-muted">
+        <div class="flex items-center gap-2"><span class="text-ok"></span> FC Alias Manager</div>
+        <div class="flex items-center gap-2"><span class="text-brand"></span> Zone Editor</div>
+        <div class="flex items-center gap-2"><span class="text-purp"></span> SFP Diagnostics</div>
+        <div class="flex items-center gap-2"><span class="text-cyan"></span> Fabric Discovery</div>
+      </div>
+    </div>
+    <!-- Right panel -->
+    <div class="w-full md:w-[440px] flex flex-col items-center justify-center bg-surface md:border-l border-border p-8 md:p-10 overflow-y-auto">
+      <h2 class="text-xl font-semibold mb-1">Sign in</h2>
+      <p class="text-tx-dim text-xs mb-8">Enter your credentials to continue</p>
+      <div class="w-full space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-tx-dim mb-1.5 uppercase tracking-wide">Username</label>
+          <input id="login-user" type="text" value="admin" class="w-full bg-surface-2 border border-border rounded-md px-3 py-2 text-sm text-tx focus:outline-none focus:border-brand transition-colors" placeholder="admin">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-tx-dim mb-1.5 uppercase tracking-wide">Password</label>
+          <input id="login-pass" type="password" class="w-full bg-surface-2 border border-border rounded-md px-3 py-2 text-sm text-tx focus:outline-none focus:border-brand transition-colors" placeholder="">
+        </div>
+        <div id="login-error" class="text-err text-xs hidden"></div>
+        <button id="login-btn" onclick="doLogin()"
+          class="w-full bg-brand hover:bg-brand-hover text-white text-sm font-semibold py-2.5 rounded-md transition-all">
+          Sign in
+        </button>
+        <p class="text-center text-tx-muted text-xs">Default: admin / Admin1234!</p>
+      <p id="login-hint" class="text-center text-tx-muted text-[10px] hidden">
+        If login fails, run: <code class="font-mono">python main.py --reset-db</code>
+      </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- -----------------------------------------------------------
+     MAIN APP SHELL
+------------------------------------------------------------ -->
+<div id="app" class="hidden fixed inset-0 flex" style="width:100%;height:100%;min-height:100%;">
+
+  <!-- SIDEBAR -->
+  <aside class="w-52 flex-shrink-0 bg-surface border-r border-border flex flex-col">
+    <!-- Logo -->
+    <div class="px-4 py-4 border-b border-border">
+      <div class="text-brand font-bold text-sm tracking-tight">SAN Platform</div>
+      <div class="text-tx-muted text-[10px] tracking-widest mt-0.5">CISCO MDS 9000</div>
+    </div>
+
+    <!-- Switch selector -->
+    <div class="px-3 py-2 border-b border-border">
+      <div class="text-[10px] font-bold text-tx-muted tracking-widest mb-1.5">ACTIVE SWITCH</div>
+      <select id="switch-select" onchange="onSwitchChange()" class="w-full bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx focus:outline-none focus:border-brand appearance-none cursor-pointer">
+        <option value="">No switch selected</option>
+      </select>
+    </div>
+
+    <!-- Nav -->
+    <nav class="flex-1 px-2 py-2 overflow-y-auto space-y-0.5">
+      <div class="text-[10px] font-bold text-tx-muted tracking-widest px-2 pt-1 pb-1.5">NAVIGATION</div>
+    </nav>
+
+    <!-- Footer -->
+    <div class="px-3 py-3 border-t border-border space-y-1.5">
+      <div id="user-label" class="text-[10px] text-tx-dim truncate"></div>
+      <button onclick="toggleTheme()" class="w-full text-left text-xs text-tx-dim hover:text-tx px-2 py-1.5 rounded hover:bg-surface-2 transition-colors"> Toggle theme</button>
+      <button onclick="doLogout()" class="w-full text-left text-xs text-tx-dim hover:text-err px-2 py-1.5 rounded hover:bg-err/10 transition-colors"> Sign out</button>
+    </div>
+  </aside>
+
+  <!-- MAIN CONTENT -->
+  <main class="flex-1 flex flex-col overflow-hidden">
+    <!-- Top bar -->
+    <div class="h-9 bg-surface border-b border-border flex items-center px-4 gap-3 flex-shrink-0">
+      <div id="breadcrumb" class="text-xs text-tx-dim">Dashboard</div>
+      <div class="flex-1"></div>
+      <div id="sim-badge" class="hidden text-[10px] font-semibold bg-brand/10 text-brand border border-brand/30 rounded-full px-2.5 py-0.5">SIMULATOR</div>
+      <div id="status-text" class="text-[11px] text-tx-muted"></div>
+    </div>
+
+    <!-- Page content -->
+    <div id="page-content" class="flex-1 overflow-y-auto p-5" style="display:block;">
+      <!-- Pages rendered here -->
+    </div>
+  </main>
+</div>
+
+<!-- -----------------------------------------------------------
+     MODAL OVERLAY
+------------------------------------------------------------ -->
+<div id="modal-overlay" class="hidden fixed inset-0 bg-black/60 z-40 flex items-start justify-center pt-6 pb-6" onclick="closeModal(event)">
+  <div id="modal-box" class="bg-surface border border-border-2 rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-border sticky top-0 bg-surface z-10 rounded-t-xl">
+      <h3 id="modal-title" class="text-sm font-semibold"></h3>
+      <button onclick="closeModal()" class="text-tx-dim hover:text-tx text-lg leading-none">&times;</button>
+    </div>
+    <div id="modal-body" class="p-5 pb-6"></div>
+  </div>
+</div>
+
+<!-- -----------------------------------------------------------
+     TOAST NOTIFICATIONS
+------------------------------------------------------------ -->
+<div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none"></div>
+
+<!-- -----------------------------------------------------------
+     JAVASCRIPT -- Core Framework
+------------------------------------------------------------ -->
+<script>
+// -- State ---------------------------------------------------------------------
+var bridge = true; // fetch-based: always ready
+var currentUser = null;
+var currentSwitch = null;
+var allSwitches = [];
+var currentPage = 'dashboard';
+var isDark = true;
+var charts = {};
+
+// -- Bridge init ---------------------------------------------------------------
+// Bridge uses fetch() to bridge://call -- no QWebChannel or qt.webChannelTransport needed.
+
+// ---------------------------------------------------------------------------
+// Bridge: JS->Python via console.log("__bridge__:{...}")
+// Python replies via runJavaScript("window.__bridgeReply(id, json)")
+// ---------------------------------------------------------------------------
+var _pending = {};
+var _callId  = 0;
+
+window.__bridgeReply = function(id, resultJson) {
+  var p = _pending[id];
+  if (!p) return;
+  clearTimeout(p.timer);
+  delete _pending[id];
+  p.resolve(resultJson);
+};
+
+function call(method) {
+  var args = Array.prototype.slice.call(arguments, 1);
+  return new Promise(function(resolve, reject) {
+    var id = ++_callId;
+    _pending[id] = {
+      resolve: resolve,
+      reject: reject,
+      timer: setTimeout(function() {
+        delete _pending[id];
+        reject(new Error('Timeout: bridge.' + method));
+      }, 10000)
+    };
+    console.log('__bridge__:' + JSON.stringify({id: id, method: method, args: args}));
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('login-pass').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doLogin();
+  });
+  document.getElementById('login-user').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') document.getElementById('login-pass').focus();
+  });
+});
+
+function _enableLogin() {}
+
+// -- Auth ----------------------------------------------------------------------
+async function doLogin() {
+  var u = document.getElementById('login-user').value.trim();
+  var p = document.getElementById('login-pass').value;
+  if (!u || !p) { showLoginError('Enter username and password'); return; }
+  // bridge check removed - fetch approach has no bridge object
+  var btn = document.getElementById('login-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Signing in...'; }
+  try {
+    var res = JSON.parse(await call('login', u, p));
+    if (res.ok) {
+      currentUser = res.user;
+      document.getElementById('login-screen').classList.add('hidden');
+      document.getElementById('app').classList.remove('hidden');
+      await initApp();
+    } else {
+      var msg = res.error || 'Unknown error';
+      if (res.debug) msg += ' | ' + res.debug;
+      if (res.trace) msg += ' | ' + res.trace.slice(0, 200);
+      showLoginError(msg);
+      if (btn) { btn.disabled = false; btn.textContent = 'Sign in'; }
+    }
+  } catch(e) {
+    showLoginError('Error: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Sign in'; }
+  }
+}
+
+function showLoginError(msg) {
+  var el = document.getElementById('login-error');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  var hint = document.getElementById('login-hint');
+  if (hint) hint.classList.remove('hidden');
+}
+
+// -- App init ------------------------------------------------------------------
+async function initApp() {
+  document.getElementById('user-label').textContent =
+    currentUser.username + '  .  ' + currentUser.role;
+  buildNav();
+  await refreshSwitches();
+  await checkSimMode();
+  navigate('dashboard');
+}
+
+function buildNav() {
+  var nav = document.querySelector('nav');
+  var pages = [
+    { id:'dashboard',   label:'Dashboard',       icon:'#', roles:['ADMIN','OPERATOR','VIEWER'] },
+    { id:'aliases',     label:'FC Aliases',       icon:'@', roles:['ADMIN','OPERATOR','VIEWER'] },
+    { id:'zoning',      label:'Zone Editor',      icon:'Z', roles:['ADMIN','OPERATOR'] },
+    { id:'fabric',      label:'Fabric',           icon:'F', roles:['ADMIN','OPERATOR','VIEWER'] },
+    { id:'inventory',   label:'Port Inventory',   icon:'P', roles:['ADMIN','OPERATOR','VIEWER'] },
+    { id:'sfp',         label:'SFP Health',       icon:'S', roles:['ADMIN','OPERATOR','VIEWER'] },
+    { id:'performance', label:'Performance',      icon:'~', roles:['ADMIN','OPERATOR','VIEWER'] },
+    { id:'snapshots',   label:'Snapshots',        icon:'*', roles:['ADMIN','OPERATOR'] },
+    { id:'users',       label:'Users',            icon:'U', roles:['ADMIN'] },
+    { id:'settings',    label:'Settings',         icon:'=', roles:['ADMIN'] },
+    { id:'simulator',   label:'Simulator',        icon:'~', roles:['ADMIN'] },
+    { id:'help',        label:'Help',             icon:'?', roles:['ADMIN','OPERATOR','VIEWER'] },
+  ];
+  var role = currentUser ? currentUser.role : '';
+  var header = nav.querySelector('div');
+  nav.innerHTML = '';
+  nav.appendChild(header);
+  pages.forEach(function(p) {
+    if (!p.roles.includes(role)) return;
+    var btn = document.createElement('button');
+    btn.id = 'nav-' + p.id;
+    btn.className = 'nav-btn w-full flex items-center gap-2.5 px-2 py-1.5 rounded text-xs text-tx-dim hover:text-tx hover:bg-surface-2 transition-colors text-left';
+    btn.innerHTML = '<span class="font-mono text-sm leading-none w-4">' + p.icon + '</span>' + p.label;
+    btn.onclick = function() { navigate(p.id); };
+    nav.appendChild(btn);
+  });
+}
+
+async function refreshSwitches() {
+  allSwitches = JSON.parse(await call('get_switches'));
+  var sel = document.getElementById('switch-select');
+  sel.innerHTML = allSwitches.length
+    ? allSwitches.map(function(s) {
+        return '<option value="' + s.id + '">' + escHtml(s.display_name || s.hostname || s.ip_address) + '</option>';
+      }).join('')
+    : '<option value="">No switches -- add in Settings</option>';
+  currentSwitch = allSwitches[0] || null;
+  updateStatusBar();
+}
+
+function onSwitchChange() {
+  var id = document.getElementById('switch-select').value;
+  currentSwitch = allSwitches.find(function(s) { return s.id === id; }) || null;
+  updateStatusBar();
+  navigate(currentPage);
+}
+
+async function checkSimMode() {
+  var isSim = JSON.parse(await call('is_sim_mode'));
+  document.getElementById('sim-badge').classList.toggle('hidden', !isSim);
+}
+
+function updateStatusBar() {
+  var el = document.getElementById('status-text');
+  if (currentSwitch) {
+    var name = currentSwitch.display_name || currentSwitch.hostname || currentSwitch.ip_address;
+    el.textContent = name + '  .  ' + currentSwitch.ip_address;
+  } else {
+    el.textContent = 'No switch selected';
+  }
+}
+
+// -- Navigation ----------------------------------------------------------------
+async function navigate(pageId) {
+  currentPage = pageId;
+  document.querySelectorAll('.nav-btn').forEach(function(b) {
+    var active = b.id === 'nav-' + pageId;
+    b.className = active
+      ? 'nav-btn w-full flex items-center gap-2.5 px-2 py-1.5 rounded text-xs bg-brand/15 text-brand font-semibold text-left'
+      : 'nav-btn w-full flex items-center gap-2.5 px-2 py-1.5 rounded text-xs text-tx-dim hover:text-tx hover:bg-surface-2 transition-colors text-left';
+  });
+  document.getElementById('breadcrumb').textContent =
+    pageId.charAt(0).toUpperCase() + pageId.slice(1);
+  document.getElementById('page-content').innerHTML =
+    '<div class="flex items-center justify-center h-40 text-tx-dim text-sm gap-2">' +
+    '<div class="spin border-2 border-brand border-t-transparent rounded-full w-4 h-4"></div>Loading...</div>';
+  Object.values(charts).forEach(function(c) { if (c && c.destroy) c.destroy(); });
+  charts = {};
+  var pages = {
+    dashboard: dashboard, aliases: aliases, zoning: zoning, fabric: fabric,
+    inventory: inventory, sfp: sfp, performance: performance,
+    snapshots: snapshots, users: users, settings: settings,
+    simulator: simulatorSettings,
+    help: helpPage
+  };
+  if (pages[pageId]) {
+    try {
+      await pages[pageId]();
+    } catch(e) {
+      document.getElementById('page-content').innerHTML =
+        '<div class="p-6">' +
+        '<p class="text-err font-semibold mb-2">Error loading page: ' + escHtml(pageId) + '</p>' +
+        '<pre class="text-xs text-tx-dim whitespace-pre-wrap bg-surface-2 rounded p-3">' + escHtml(String(e.stack || e)) + '</pre>' +
+        '</div>';
+    }
+  }
+}
+
+// -- Page renderer -------------------------------------------------------------
+function setPage(html) {
+  document.getElementById('page-content').innerHTML = '<div class="fade-in" style="display:block;width:100%;">' + html + '</div>';
+}
+
+// -- UI component helpers ------------------------------------------------------
+var H = {
+  page: function(title, subtitle, actions) {
+    return '<div class="flex items-start justify-between mb-5 pb-4 border-b border-border" style="display:flex;width:100%;">' +
+      '<div><h1 class="text-lg font-bold tracking-tight text-tx">' + title + '</h1>' +
+      '<p class="text-xs text-tx-dim mt-0.5">' + subtitle + '</p></div>' +
+      '<div class="flex items-center gap-2 flex-shrink-0 mt-0.5">' + (actions||'') + '</div></div>';
+  },
+  card: function(content, cls) {
+    return '<div class="bg-surface border border-border rounded-lg ' + (cls||'') + '">' + content + '</div>';
+  },
+  cardHeader: function(title) {
+    return '<div class="px-4 py-3 border-b border-border">' +
+      '<div class="text-[10px] font-bold text-tx-muted tracking-widest uppercase">' + title + '</div></div>';
+  },
+  btn: function(label, onclick, cls) {
+    return '<button onclick="' + onclick + '" class="bg-brand hover:bg-brand-hover text-white text-xs font-medium px-3 py-1.5 rounded transition-colors ' + (cls||'') + '">' + label + '</button>';
+  },
+  btnSec: function(label, onclick, cls) {
+    return '<button onclick="' + onclick + '" class="bg-surface-2 hover:bg-surface-3 border border-border text-tx text-xs font-medium px-3 py-1.5 rounded transition-colors ' + (cls||'') + '">' + label + '</button>';
+  },
+  btnDanger: function(label, onclick, cls) {
+    return '<button onclick="' + onclick + '" class="bg-err/15 hover:bg-err text-err hover:text-white border border-err/30 text-xs font-medium px-3 py-1.5 rounded transition-colors ' + (cls||'') + '">' + label + '</button>';
+  },
+  btnSuccess: function(label, onclick, cls) {
+    return '<button onclick="' + onclick + '" class="bg-ok/15 hover:bg-ok text-ok hover:text-white border border-ok/30 text-xs font-medium px-3 py-1.5 rounded transition-colors ' + (cls||'') + '">' + label + '</button>';
+  },
+  badge: function(text, color) {
+    var map = {
+      blue:'bg-brand/10 text-brand', green:'bg-ok/15 text-ok',
+      red:'bg-err/15 text-err',      yellow:'bg-warn/15 text-warn',
+      purple:'bg-purp/15 text-purp', cyan:'bg-cyan/15 text-cyan'
+    };
+    return '<span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ' + (map[color]||map.blue) + '">' + text + '</span>';
+  },
+  input: function(id, placeholder, value, type) {
+    return '<input id="' + id + '" type="' + (type||'text') + '" value="' + escHtml(value||'') +
+      '" placeholder="' + escHtml(placeholder||'') +
+      '" class="w-full bg-surface-2 border border-border rounded px-3 py-1.5 text-xs text-tx focus:outline-none focus:border-brand transition-colors">';
+  },
+  select: function(id, options, selected) {
+    return '<select id="' + id + '" class="w-full bg-surface-2 border border-border rounded px-3 py-1.5 text-xs text-tx focus:outline-none focus:border-brand appearance-none cursor-pointer">' +
+      options.map(function(o) {
+        return '<option value="' + o[0] + '"' + (o[0]===selected?' selected':'') + '>' + o[1] + '</option>';
+      }).join('') + '</select>';
+  },
+  formRow: function(label, inputHtml) {
+    return '<div class="flex flex-col gap-1"><label class="text-[10px] font-semibold text-tx-dim uppercase tracking-wide">' + label + '</label>' + inputHtml + '</div>';
+  },
+  table: function(headers, rows, emptyMsg) {
+    var head = headers.map(function(h) {
+      return '<th class="text-left px-3 py-2.5 text-[10px] font-bold text-tx-muted uppercase tracking-wider whitespace-nowrap">' + h + '</th>';
+    }).join('');
+    var body = rows.length
+      ? rows.map(function(r) {
+          return '<tr class="transition-colors">' +
+            r.map(function(c) { return '<td class="px-3 py-2.5 text-tx whitespace-nowrap">' + c + '</td>'; }).join('') +
+            '</tr>';
+        }).join('')
+      : '<tr><td colspan="' + headers.length + '" class="px-3 py-8 text-center text-tx-dim">' + (emptyMsg||'No data') + '</td></tr>';
+    return '<div class="overflow-x-auto"><table class="w-full text-xs"><thead><tr class="border-b border-border bg-surface-2/50">' + head + '</tr></thead><tbody class="divide-y divide-border">' + body + '</tbody></table></div>';
+  },
+  stat: function(value, label, color) {
+    return '<div class="bg-surface border border-border rounded-lg px-4 py-3">' +
+      '<div class="text-2xl font-bold ' + (color||'text-brand') + ' leading-none">' + value + '</div>' +
+      '<div class="text-[10px] font-semibold text-tx-muted uppercase tracking-wider mt-1.5">' + label + '</div></div>';
+  },
+};
+
+// -- Utility functions ---------------------------------------------------------
+function doLogout() {
+  currentUser = null; currentSwitch = null;
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('login-screen').classList.remove('hidden');
+  document.getElementById('login-pass').value = '';
+  document.getElementById('login-error').classList.add('hidden');
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showModal(title, bodyHtml, size) {
+  // size: 'sm' | 'md' (default) | 'lg' | 'xl'
+  var widths = { sm: 'max-w-md', md: 'max-w-2xl', lg: 'max-w-3xl', xl: 'max-w-4xl' };
+  var box = document.getElementById('modal-box');
+  box.className = box.className
+    .replace(/max-w-\w+/g, widths[size] || widths.md);
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = bodyHtml;
+  document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+function closeModal(e) {
+  if (!e || e.target === document.getElementById('modal-overlay'))
+    document.getElementById('modal-overlay').classList.add('hidden');
+}
+
+function toast(msg, type) {
+  var colors = {
+    success: 'bg-ok/20 border-ok/40 text-ok',
+    error:   'bg-err/20 border-err/40 text-err',
+    info:    'bg-brand/20 border-brand/40 text-brand'
+  };
+  var t = document.createElement('div');
+  t.className = 'pointer-events-auto text-xs font-medium px-4 py-2.5 rounded-lg border ' +
+    (colors[type]||colors.info) + ' fade-in shadow-lg';
+  t.textContent = msg;
+  document.getElementById('toast-container').appendChild(t);
+  setTimeout(function() { t.remove(); }, 3500);
+}
+
+function fmtDate(s) { return s ? s.slice(0,19).replace('T',' ') : 'Never'; }
+
+function toggleTheme() {
+  isDark = !isDark;
+  var html = document.documentElement;
+  var body = document.body;
+  if (isDark) {
+    html.classList.add('dark');
+    html.classList.remove('light');
+    body.style.backgroundColor = '#0d0f14';
+    body.style.color = '#dce3f0';
+  } else {
+    html.classList.remove('dark');
+    html.classList.add('light');
+    body.style.backgroundColor = '#f4f6fb';
+    body.style.color = '#1a2035';
+  }
+}
+
+function noSwitch() {
+  return '<div class="flex items-center justify-center h-40 text-tx-dim text-sm">No switch selected -- add one in Settings</div>';
+}
+
+// -- DASHBOARD -----------------------------------------------------------------
+async function dashboard() {
+  var stats, switches;
+  try { stats = JSON.parse(await call('get_db_stats')); }
+  catch(e) { stats = {switches:0,aliases:0,zones:0,zone_sets:0,snapshots:0,users:0,metrics:0}; }
+  try { switches = JSON.parse(await call('get_switches')); }
+  catch(e) { switches = []; }
+  var sw = currentSwitch;
+
+  var swRows = switches.map(function(s) {
+    return [
+      '<code class="font-mono text-xs">' + s.ip_address + '</code>',
+      escHtml(s.display_name || s.hostname || '--'),
+      escHtml(s.model || '--'),
+      escHtml(s.nxos_version || '--'),
+      String(s.alias_count || 0),
+      String(s.zone_count || 0),
+      fmtDate(s.last_seen_at),
+    ];
+  });
+
+  var swInfoRows = sw
+    ? [['IP', sw.ip_address],['Name', sw.display_name||sw.hostname||'--'],
+       ['Model', sw.model||'--'],['NX-OS', sw.nxos_version||'--'],
+       ['Last Seen', fmtDate(sw.last_seen_at)]].map(function(kv) {
+         return '<div class="flex items-center gap-2">' +
+           '<span class="text-tx-dim text-xs w-24 flex-shrink-0">' + kv[0] + '</span>' +
+           '<span class="text-xs font-medium text-tx">' + escHtml(String(kv[1])) + '</span></div>';
+       }).join('')
+    : '<p class="text-xs text-tx-dim">No switch selected</p>';
+
+  var actionBtns = [
+    ['FC Aliases','aliases','text-brand','bg-brand/10 border-brand/20'],
+    ['Zone Editor','zoning','text-purp','bg-purp/10 border-purp/20'],
+    ['Fabric','fabric','text-cyan','bg-cyan/10 border-cyan/20'],
+    ['SFP Health','sfp','text-ok','bg-ok/10 border-ok/20'],
+    ['Performance','performance','text-warn','bg-warn/10 border-warn/20'],
+  ].map(function(a) {
+    return '<button onclick="navigate(\'' + a[1] + '\')" class="w-full text-left text-xs font-medium ' +
+      a[2] + ' ' + a[3] + ' border rounded px-3 py-2 hover:opacity-80 transition-opacity">' + a[0] + '</button>';
+  }).join('');
+
+  setPage(
+    H.page('Dashboard', 'SAN platform overview') +
+    '<div class="grid grid-cols-5 gap-3 mb-4">' +
+      H.stat(stats.switches, 'Switches', 'text-brand') +
+      H.stat(stats.aliases, 'FC Aliases', 'text-ok') +
+      H.stat(stats.zones, 'Zones', 'text-purp') +
+      H.stat(stats.zone_sets, 'Zone Sets', 'text-cyan') +
+      H.stat((stats.metrics || 0).toLocaleString(), 'Metrics', 'text-warn') +
+    '</div>' +
+    '<div class="grid grid-cols-3 gap-3 mb-4">' +
+      H.card(H.cardHeader('Active Switch') + '<div class="p-4 space-y-2.5">' + swInfoRows + '</div>', 'col-span-2') +
+      H.card(H.cardHeader('Quick Actions') + '<div class="p-3 space-y-2">' + actionBtns + '</div>') +
+    '</div>' +
+    H.card(H.cardHeader('Registered Switches') +
+      H.table(['IP Address','Name','Model','NX-OS','Aliases','Zones','Last Seen'],
+              swRows, 'No switches -- add one in Settings'))
+  );
+}
+
+// -- ZONING --------------------------------------------------------------------
+// -- ALIASES ------------------------------------------------------------------
+async function aliases() {
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+  var data;
+  try { data = JSON.parse(await call('get_aliases', currentSwitch.id)); }
+  catch(e) { setPage('<div class="p-6 text-err text-sm">Error loading aliases: ' + escHtml(String(e)) + '</div>'); return; }
+
+  window._aliasData = data;
+
+  function renderRows(list) {
+    return list.map(function(a) {
+      return [
+        '<span class="font-medium">' + escHtml(a.name) + '</span>',
+        '<code class="font-mono text-[11px] text-tx-dim">' + escHtml(a.wwn) + '</code>',
+        escHtml(a.description || '--'),
+        a.synced_at ? H.badge('Synced','green') : a.is_orphaned ? H.badge('Orphaned','yellow') : H.badge('Local','blue'),
+        '<div class="flex gap-1.5">' +
+          H.btnSec('Edit', 'editAlias(\'' + a.id + '\')') +
+          H.btnDanger('X', 'deleteAlias(\'' + a.id + '\',\'' + escHtml(a.name) + '\')') +
+        '</div>',
+      ];
+    });
+  }
+
+  setPage(
+    H.page('FC Aliases',
+      data.length + ' device alias' + (data.length !== 1 ? 'es' : '') + ' on ' + escHtml(currentSwitch.display_name || currentSwitch.ip_address),
+      '<input id="alias-search" oninput="filterAliases(this.value)" placeholder="Search..." class="bg-surface-2 border border-border rounded px-2.5 py-1.5 text-xs text-tx focus:outline-none focus:border-brand w-44">' +
+      H.btnSec('Sync from Switch', 'syncAliases()') +
+      H.btn('+ Add Alias', 'showAddAlias()')
+    ) +
+    H.card('<div id="alias-table">' + H.table(['Alias Name','WWN','Description','Status','Actions'], renderRows(data), 'No aliases yet') + '</div>')
+  );
+}
+
+function filterAliases(q) {
+  var data = window._aliasData || [];
+  var filtered = q ? data.filter(function(a) {
+    return a.name.toLowerCase().indexOf(q.toLowerCase()) >= 0 ||
+           a.wwn.toLowerCase().indexOf(q.toLowerCase()) >= 0 ||
+           (a.description||'').toLowerCase().indexOf(q.toLowerCase()) >= 0;
+  }) : data;
+  document.getElementById('alias-table').innerHTML =
+    H.table(['Alias Name','WWN','Description','Status','Actions'],
+      filtered.map(function(a) {
+        return [
+          '<span class="font-medium">' + escHtml(a.name) + '</span>',
+          '<code class="font-mono text-[11px] text-tx-dim">' + escHtml(a.wwn) + '</code>',
+          escHtml(a.description || '--'),
+          a.synced_at ? H.badge('Synced','green') : a.is_orphaned ? H.badge('Orphaned','yellow') : H.badge('Local','blue'),
+          '<div class="flex gap-1.5">' +
+            H.btnSec('Edit','editAlias(\'' + a.id + '\')') +
+            H.btnDanger('X','deleteAlias(\'' + a.id + '\',\'' + escHtml(a.name) + '\')') +
+          '</div>',
+        ];
+      }), 'No matches');
+}
+
+function showAddAlias() {
+  showModal('Add FC Alias',
+    '<div class="space-y-3">' +
+    H.formRow('Alias Name *', H.input('m-alias-name','DB_Server_01_HBA_A')) +
+    H.formRow('WWN *', H.input('m-alias-wwn','21:00:00:24:ff:8a:1b:2c')) +
+    H.formRow('Description', H.input('m-alias-desc','Optional')) +
+    '<div id="m-alias-err" class="text-err text-xs hidden"></div>' +
+    '<div class="flex gap-2 pt-1">' + H.btn('Save','saveAlias(null)') + H.btnSec('Cancel','closeModal()') + '</div>' +
+    '</div>');
+}
+
+async function editAlias(id) {
+  var a = (window._aliasData||[]).find(function(x){return x.id===id;});
+  if (!a) return;
+  showModal('Edit Alias',
+    '<div class="space-y-3">' +
+    H.formRow('Alias Name *', H.input('m-alias-name','',a.name)) +
+    H.formRow('WWN *', H.input('m-alias-wwn','',a.wwn)) +
+    H.formRow('Description', H.input('m-alias-desc','',a.description||'')) +
+    '<div id="m-alias-err" class="text-err text-xs hidden"></div>' +
+    '<div class="flex gap-2 pt-1">' + H.btn('Save','saveAlias(\'' + id + '\')') + H.btnSec('Cancel','closeModal()') + '</div>' +
+    '</div>');
+}
+
+async function saveAlias(id) {
+  var name = document.getElementById('m-alias-name').value.trim();
+  var wwn  = document.getElementById('m-alias-wwn').value.trim().toLowerCase();
+  var desc = document.getElementById('m-alias-desc').value.trim();
+  var errEl = document.getElementById('m-alias-err');
+  if (!name) { errEl.textContent='Name required'; errEl.classList.remove('hidden'); return; }
+  if (!/^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(wwn)) { errEl.textContent='Invalid WWN'; errEl.classList.remove('hidden'); return; }
+  var res;
+  try {
+    res = JSON.parse(id ? await call('update_alias',id,name,wwn,desc) : await call('create_alias',currentSwitch.id,name,wwn,desc));
+  } catch(e) { errEl.textContent=String(e); errEl.classList.remove('hidden'); return; }
+  if (res.ok) { closeModal(); toast(id?'Alias updated':'Alias created','success'); await aliases(); }
+  else { errEl.textContent=res.error; errEl.classList.remove('hidden'); }
+}
+
+async function deleteAlias(id, name) {
+  if (!confirm('Delete alias \'' + name + '\'?')) return;
+  var res = JSON.parse(await call('delete_alias', id));
+  if (res.ok) { toast('Alias deleted'); await aliases(); }
+  else toast(res.error,'error');
+}
+
+async function syncAliases() {
+  if (!currentSwitch) return;
+  toast('Syncing...','info');
+  try {
+    var res = JSON.parse(await call('sync_aliases', currentSwitch.id, currentSwitch.ip_address));
+    if (res.ok) { toast('Synced ' + res.total + ' aliases, ' + res.new + ' new','success'); await aliases(); }
+    else toast(res.error,'error');
+  } catch(e) { toast(String(e),'error'); }
+}
+
+
+async function zoning() {
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+  const [zonesData, zoneSetsData, aliasData, switchVsans] = await Promise.all([
+    call('get_zones', currentSwitch.id).then(JSON.parse),
+    call('get_zone_sets', currentSwitch.id).then(JSON.parse),
+    call('get_aliases', currentSwitch.id).then(JSON.parse),
+    call('get_switch_vsans', currentSwitch.id).then(JSON.parse).catch(function(){return [];}),
+  ]);
+
+  // Prefer VSANs discovered from the switch (show vsan); fall back to
+  // whatever VSANs already exist on local zones/zone sets, defaulting to 100.
+  var vsans;
+  if (switchVsans.length) {
+    vsans = switchVsans.map(function(v){ return v.vsan_id; }).sort(function(a,b){return a-b;});
+  } else {
+    vsans = [...new Set([...zonesData.map(z=>z.vsan_id), ...zoneSetsData.map(z=>z.vsan_id), 100])].sort(function(a,b){return a-b;});
+  }
+  window._zoningAliases  = aliasData;
+  window._zoningAllZones = zonesData;
+  window._zoningAllSets  = zoneSetsData;
+  window._zoningVsans    = vsans;
+  window._zoningVsanMeta = switchVsans;
+
+  const vsanOpts = vsans.map(function(v) {
+    var meta = switchVsans.find(function(sv){return sv.vsan_id===v;});
+    var label = meta && meta.name ? ('VSAN ' + v + ' (' + meta.name + ')') : ('VSAN ' + v);
+    return '<option value="' + v + '">' + label + '</option>';
+  }).join('');
+
+  setPage(`
+    ${H.page('Zone Editor', 'Draft and commit FC zones and zone sets per VSAN', `
+      <select id="vsan-sel" onchange="filterByVsan()" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx focus:outline-none focus:border-brand appearance-none w-44">${vsanOpts}</select>
+      ${H.btnSec('Sync VSANs', 'syncVsansFromZoning()')}
+      ${H.btnSec('Pull Zones', `pullZones()`)}
+      ${H.btnSec('Snapshot', `takeSnapshot()`)}
+      ${H.btnSuccess('Commit', `commitZones()`)}
+    `)}
+
+    <div class="grid grid-cols-2 gap-3">
+      <!-- Zones -->
+      ${H.card(`
+        ${H.cardHeader('Zones')}
+        <div class="px-3 py-2.5 border-b border-border flex gap-2">
+          ${H.btn(' Add Zone','showAddZone()')}
+          <input id="zone-search" oninput="filterZones(this.value)" placeholder="Filter..." class="bg-surface-2 border border-border rounded px-2 py-1 text-xs text-tx focus:outline-none focus:border-brand flex-1">
+        </div>
+        <div id="zones-table" class="overflow-y-auto max-h-96">
+          ${renderZonesTable(zonesData)}
+        </div>
+      `)}
+
+      <!-- Zone Sets -->
+      ${H.card(`
+        ${H.cardHeader('Zone Sets')}
+        <div class="px-3 py-2.5 border-b border-border flex gap-2">
+          ${H.btn(' Add Zone Set','showAddZoneSet()')}
+        </div>
+        <div id="zsets-table" class="overflow-y-auto max-h-96">
+          ${renderZoneSetsTable(zoneSetsData)}
+        </div>
+      `)}
+    </div>
+  `);
+}
+
+async function syncVsansFromZoning() {
+  if (!currentSwitch) return;
+  try {
+    var res = JSON.parse(await call('sync_vsans', currentSwitch.id, currentSwitch.ip_address));
+    if (res.ok) { toast('Discovered ' + res.count + ' VSAN(s)', 'success'); await zoning(); }
+    else toast(res.error, 'error');
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+function filterByVsan() {
+  const vsan = parseInt(document.getElementById('vsan-sel').value);
+  const zones = window._zoningAllZones.filter(z => z.vsan_id === vsan);
+  const sets  = window._zoningAllSets.filter(z => z.vsan_id === vsan);
+  document.getElementById('zones-table').innerHTML = renderZonesTable(zones);
+  document.getElementById('zsets-table').innerHTML = renderZoneSetsTable(sets);
+}
+
+function filterZones(q) {
+  const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
+  const zones = window._zoningAllZones.filter(z =>
+    z.vsan_id === vsan && z.name.toLowerCase().includes(q.toLowerCase())
+  );
+  document.getElementById('zones-table').innerHTML = renderZonesTable(zones);
+}
+
+function renderZonesTable(zones) {
+  if (!zones.length) return '<p class="px-4 py-6 text-xs text-tx-dim text-center">No zones in this VSAN</p>';
+  return `<table class="w-full text-xs">
+    <thead><tr class="border-b border-border bg-surface-2/40">
+      <th class="text-left px-3 py-2 text-[10px] font-bold text-tx-muted uppercase tracking-wide">Name</th>
+      <th class="text-left px-3 py-2 text-[10px] font-bold text-tx-muted uppercase tracking-wide w-10">Members</th>
+      <th class="text-left px-3 py-2 text-[10px] font-bold text-tx-muted uppercase tracking-wide w-20">Status</th>
+      <th class="px-3 py-2 w-28"></th>
+    </tr></thead>
+    <tbody class="divide-y divide-border">
+    ${zones.map(z => `<tr class="hover:bg-surface-2/50 transition-colors">
+      <td class="px-3 py-2.5 font-medium">${escHtml(z.name)}</td>
+      <td class="px-3 py-2.5 text-center">${(z.members||[]).length}</td>
+      <td class="px-3 py-2.5">${z.is_draft ? H.badge('Draft','yellow') : H.badge('Committed','green')}</td>
+      <td class="px-3 py-2.5">
+        <div class="flex gap-1 justify-end">
+          ${H.btnSec('','editZone(\''+z.id+'\')')}
+          ${H.btnDanger('','deleteZone(\''+z.id+'\',\''+escHtml(z.name)+'\')')}
+        </div>
+      </td>
+    </tr>`).join('')}
+    </tbody></table>`;
+}
+
+function renderZoneSetsTable(sets) {
+  if (!sets.length) return '<p class="px-4 py-6 text-xs text-tx-dim text-center">No zone sets in this VSAN</p>';
+  return `<table class="w-full text-xs">
+    <thead><tr class="border-b border-border bg-surface-2/40">
+      <th class="text-left px-3 py-2 text-[10px] font-bold text-tx-muted uppercase tracking-wide">Name</th>
+      <th class="text-left px-3 py-2 text-[10px] font-bold text-tx-muted uppercase tracking-wide w-12">Zones</th>
+      <th class="text-left px-3 py-2 text-[10px] font-bold text-tx-muted uppercase tracking-wide w-20">Status</th>
+      <th class="px-3 py-2 w-36"></th>
+    </tr></thead>
+    <tbody class="divide-y divide-border">
+    ${sets.map(zs => `<tr class="hover:bg-surface-2/50 transition-colors">
+      <td class="px-3 py-2.5 font-medium">${escHtml(zs.name)}</td>
+      <td class="px-3 py-2.5 text-center">${(zs.zone_members||[]).length}</td>
+      <td class="px-3 py-2.5">${zs.is_active ? H.badge('Active','green') : H.badge('Inactive','blue')}</td>
+      <td class="px-3 py-2.5">
+        <div class="flex gap-1 justify-end">
+          ${H.btnSec('','editZoneSet(\''+zs.id+'\')')}
+          ${H.btnSuccess('Activate','activateZoneSet(\''+zs.id+'\')')}
+          ${H.btnDanger('','deleteZoneSet(\''+zs.id+'\',\''+escHtml(zs.name)+'\')')}
+        </div>
+      </td>
+    </tr>`).join('')}
+    </tbody></table>`;
+}
+
+// Zone CRUD
+function showAddZone() {
+  const vsan = document.getElementById('vsan-sel')?.value || 100;
+  const aliases = window._zoningAliases || [];
+  const aliasOpts = `<option value="">Select alias...</option>` +
+    aliases.map(a=>`<option value="${escHtml(a.name)}" data-type="DEVICE_ALIAS">${escHtml(a.name)} (${a.wwn.slice(0,17)}...)</option>`).join('');
+
+  showModal('Add Zone', `
+    <div class="space-y-3">
+      ${H.formRow('Zone Name *', H.input('m-zone-name',`Zone_Name_VSAN${vsan}`))}
+      <div class="border-t border-border pt-3">
+        <div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide mb-2">Initial Members</div>
+        <div class="flex flex-wrap gap-2 mb-2">
+          <select id="m-zone-alias-sel" class="flex-1 min-w-[160px] bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx">${aliasOpts}</select>
+          <input id="m-zone-wwn" placeholder="or WWN manually" class="flex-1 min-w-[140px] bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx focus:outline-none focus:border-brand">
+          ${H.btn('Add','addZoneMemberToList()')}
+        </div>
+        <div id="m-zone-members" class="bg-surface-2/50 border border-border rounded min-h-20 p-2 space-y-1 text-xs max-h-64 overflow-y-auto"></div>
+      </div>
+      <div id="m-zone-err" class="text-err text-xs hidden"></div>
+      <div class="flex gap-2 pt-1">
+        ${H.btn('Create Zone','saveNewZone()')}
+        ${H.btnSec('Cancel','closeModal()')}
+      </div>
+    </div>
+  `);
+  window._pendingMembers = [];
+}
+
+function addZoneMemberToList() {
+  const sel = document.getElementById('m-zone-alias-sel');
+  const wwnEl = document.getElementById('m-zone-wwn');
+  const container = document.getElementById('m-zone-members');
+  const alias = sel.value;
+  const wwn = wwnEl.value.trim().toLowerCase();
+
+  if (alias) {
+    const member = { type: 'DEVICE_ALIAS', value: alias };
+    window._pendingMembers = window._pendingMembers || [];
+    if (!window._pendingMembers.find(m => m.value === alias)) {
+      window._pendingMembers.push(member);
+      renderPendingMembers(container);
+    }
+    sel.value = '';
+  } else if (wwn) {
+    if (!/^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(wwn)) {
+      document.getElementById('m-zone-err').textContent = 'Invalid WWN';
+      document.getElementById('m-zone-err').classList.remove('hidden');
+      return;
+    }
+    const member = { type: 'PWWN', value: wwn };
+    window._pendingMembers = window._pendingMembers || [];
+    if (!window._pendingMembers.find(m => m.value === wwn)) {
+      window._pendingMembers.push(member);
+      renderPendingMembers(container);
+    }
+    wwnEl.value = '';
+  }
+}
+
+function renderPendingMembers(container) {
+  container.innerHTML = (window._pendingMembers||[]).map((m,i)=>`
+    <div class="flex items-center justify-between px-2 py-1 bg-surface-3 rounded">
+      <span class="text-tx-dim">[${m.type==='DEVICE_ALIAS'?'alias':'wwn'}]</span>
+      <span class="font-medium ml-2 flex-1">${escHtml(m.value)}</span>
+      <button onclick="removePendingMember(${i})" class="text-err hover:text-err text-sm ml-2"></button>
+    </div>`).join('');
+}
+
+function removePendingMember(i) {
+  window._pendingMembers.splice(i,1);
+  renderPendingMembers(document.getElementById('m-zone-members'));
+}
+
+async function saveNewZone() {
+  const name = document.getElementById('m-zone-name').value.trim();
+  const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
+  if (!name) { document.getElementById('m-zone-err').textContent='Name required'; document.getElementById('m-zone-err').classList.remove('hidden'); return; }
+
+  const res = JSON.parse(await call('create_zone', currentSwitch.id, name, vsan));
+  if (!res.ok) { toast(res.error,'error'); return; }
+
+  for (const m of (window._pendingMembers||[])) {
+    await call('add_zone_member', res.zone.id, m.value, m.type);
+  }
+  closeModal();
+  toast('Zone created', 'success');
+  await zoning();
+}
+
+async function editZone(id) {
+  const zone = window._zoningAllZones.find(z => z.id === id);
+  if (!zone) return;
+  const aliases = window._zoningAliases || [];
+  const aliasOpts = `<option value="">Select alias...</option>` +
+    aliases.map(a=>`<option value="${escHtml(a.name)}">${escHtml(a.name)} (${a.wwn.slice(0,17)}...)</option>`).join('');
+
+  window._editZoneId = id;
+  window._pendingMembers = (zone.members||[]).map(m=>({type:m.member_type||'PWWN',value:m.value}));
+
+  showModal('Edit Zone', `
+    <div class="space-y-3">
+      ${H.formRow('Zone Name *', H.input('m-zone-name','',zone.name))}
+      <div class="border-t border-border pt-3">
+        <div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide mb-2">Members</div>
+        <div class="flex flex-wrap gap-2 mb-2">
+          <select id="m-zone-alias-sel" class="flex-1 min-w-[160px] bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx">${aliasOpts}</select>
+          <input id="m-zone-wwn" placeholder="or WWN" class="flex-1 min-w-[140px] bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx focus:outline-none focus:border-brand">
+          ${H.btn('Add','addZoneMemberToList()')}
+        </div>
+        <div id="m-zone-members" class="bg-surface-2/50 border border-border rounded min-h-20 p-2 space-y-1 text-xs max-h-64 overflow-y-auto"></div>
+      </div>
+      <div id="m-zone-err" class="text-err text-xs hidden"></div>
+      <div class="flex gap-2 pt-1">
+        ${H.btn('Save Changes','saveEditZone()')}
+        ${H.btnSec('Cancel','closeModal()')}
+      </div>
+    </div>
+  `);
+  renderPendingMembers(document.getElementById('m-zone-members'));
+}
+
+async function saveEditZone() {
+  const name = document.getElementById('m-zone-name').value.trim();
+  const id = window._editZoneId;
+  if (!name) { document.getElementById('m-zone-err').textContent='Name required'; document.getElementById('m-zone-err').classList.remove('hidden'); return; }
+
+  await call('update_zone_name', id, name);
+  const membersJson = JSON.stringify(window._pendingMembers||[]);
+  const res = JSON.parse(await call('replace_zone_members', id, membersJson));
+  if (res.ok) { closeModal(); toast('Zone updated','success'); await zoning(); }
+  else toast(res.error,'error');
+}
+
+async function deleteZone(id, name) {
+  if (!confirm(`Delete zone '${name}'?`)) return;
+  const res = JSON.parse(await call('delete_zone', id));
+  if (res.ok) { toast('Zone deleted'); await zoning(); }
+  else toast(res.error,'error');
+}
+
+// Zone Set CRUD
+function showAddZoneSet() {
+  const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
+  const zones = (window._zoningAllZones||[]).filter(z=>z.vsan_id===vsan);
+  window._editZoneSetId = null;
+  window._selectedZoneIds = new Set();
+  renderZoneSetModal('Add Zone Set', zones, '', []);
+}
+
+async function editZoneSet(id) {
+  const zs = window._zoningAllSets.find(z=>z.id===id);
+  if (!zs) return;
+  const vsan = zs.vsan_id;
+  const zones = (window._zoningAllZones||[]).filter(z=>z.vsan_id===vsan);
+  window._editZoneSetId = id;
+  window._selectedZoneIds = new Set((zs.zone_members||[]).map(zm=>zm.id));
+  renderZoneSetModal('Edit Zone Set', zones, zs.name, zs.zone_members||[]);
+}
+
+function renderZoneSetModal(title, availableZones, name, memberZones) {
+  const memberIds = new Set(memberZones.map(z=>z.id));
+  const available = availableZones.filter(z=>!memberIds.has(z.id));
+  const members   = availableZones.filter(z=>memberIds.has(z.id));
+
+  showModal(title, `
+    <div class="space-y-3">
+      ${H.formRow('Zone Set Name *', H.input('m-zs-name','Production_ZoneSet',name))}
+      <div class="border-t border-border pt-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide mb-1.5">Available Zones</div>
+            <div id="m-zs-available" class="bg-surface-2 border border-border rounded p-1.5 min-h-40 max-h-72 overflow-y-auto space-y-1">
+              ${available.map(z=>`<div class="flex items-center justify-between px-2 py-1 rounded hover:bg-surface-3 cursor-pointer text-xs group" onclick="moveToSet('${z.id}','${escHtml(z.name)}')">
+                <span>${escHtml(z.name)}</span>
+                <span class="text-brand opacity-0 group-hover:opacity-100">-></span>
+              </div>`).join('') || '<p class="text-tx-muted text-xs px-2 py-2">None available</p>'}
+            </div>
+          </div>
+          <div>
+            <div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide mb-1.5">In This Zone Set</div>
+            <div id="m-zs-members" class="bg-surface-2 border border-border rounded p-1.5 min-h-40 max-h-72 overflow-y-auto space-y-1">
+              ${members.map(z=>`<div class="flex items-center justify-between px-2 py-1 rounded hover:bg-surface-3 cursor-pointer text-xs group" onclick="removeFromSet('${z.id}','${escHtml(z.name)}')">
+                <span class="text-ok">${escHtml(z.name)}</span>
+                <span class="text-err opacity-0 group-hover:opacity-100"></span>
+              </div>`).join('') || '<p class="text-tx-muted text-xs px-2 py-2">No zones added</p>'}
+            </div>
+          </div>
+        </div>
+        <p class="text-[10px] text-tx-muted mt-1.5">Click a zone to move it between panels</p>
+      </div>
+      <div id="m-zs-err" class="text-err text-xs hidden"></div>
+      <div class="flex gap-2 pt-1">
+        ${H.btn('Save','saveZoneSet()')}
+        ${H.btnSec('Cancel','closeModal()')}
+      </div>
+    </div>
+  `);
+  window._zsAvailableZones = available;
+  window._zsMemberZones = members;
+}
+
+function moveToSet(id, name) {
+  const idx = window._zsAvailableZones.findIndex(z=>z.id===id);
+  if (idx < 0) return;
+  const zone = window._zsAvailableZones.splice(idx, 1)[0];
+  window._zsMemberZones.push(zone);
+  refreshZoneSetPanels();
+}
+
+function removeFromSet(id, name) {
+  const idx = window._zsMemberZones.findIndex(z=>z.id===id);
+  if (idx < 0) return;
+  const zone = window._zsMemberZones.splice(idx, 1)[0];
+  window._zsAvailableZones.push(zone);
+  refreshZoneSetPanels();
+}
+
+function refreshZoneSetPanels() {
+  document.getElementById('m-zs-available').innerHTML =
+    window._zsAvailableZones.map(z=>`<div class="flex items-center justify-between px-2 py-1 rounded hover:bg-surface-3 cursor-pointer text-xs group" onclick="moveToSet('${z.id}','${escHtml(z.name)}')">
+      <span>${escHtml(z.name)}</span><span class="text-brand opacity-0 group-hover:opacity-100">-></span>
+    </div>`).join('') || '<p class="text-tx-muted text-xs px-2 py-2">None available</p>';
+
+  document.getElementById('m-zs-members').innerHTML =
+    window._zsMemberZones.map(z=>`<div class="flex items-center justify-between px-2 py-1 rounded hover:bg-surface-3 cursor-pointer text-xs group" onclick="removeFromSet('${z.id}','${escHtml(z.name)}')">
+      <span class="text-ok">${escHtml(z.name)}</span><span class="text-err opacity-0 group-hover:opacity-100"></span>
+    </div>`).join('') || '<p class="text-tx-muted text-xs px-2 py-2">No zones added</p>';
+}
+
+async function saveZoneSet() {
+  const name = document.getElementById('m-zs-name').value.trim();
+  const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
+  const zoneIds = JSON.stringify(window._zsMemberZones.map(z=>z.id));
+  if (!name) { document.getElementById('m-zs-err').textContent='Name required'; document.getElementById('m-zs-err').classList.remove('hidden'); return; }
+
+  let res;
+  if (window._editZoneSetId) {
+    res = JSON.parse(await call('update_zone_set_members', window._editZoneSetId, name, zoneIds));
+  } else {
+    const cr = JSON.parse(await call('create_zone_set', currentSwitch.id, name, vsan));
+    if (!cr.ok) { toast(cr.error,'error'); return; }
+    res = JSON.parse(await call('update_zone_set_members', cr.zone_set.id, name, zoneIds));
+  }
+  if (res.ok) { closeModal(); toast('Zone set saved','success'); await zoning(); }
+  else toast(res.error,'error');
+}
+
+async function activateZoneSet(id) {
+  const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
+  const res = JSON.parse(await call('activate_zone_set', id, currentSwitch.id, vsan));
+  if (res.ok) { toast('Zone set activated','success'); await zoning(); }
+  else toast(res.error,'error');
+}
+
+async function deleteZoneSet(id, name) {
+  if (!confirm(`Delete zone set '${name}'?`)) return;
+  const res = JSON.parse(await call('delete_zone_set', id));
+  if (res.ok) { toast('Zone set deleted'); await zoning(); }
+  else toast(res.error,'error');
+}
+
+async function commitZones() {
+  const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
+  if (!confirm(`Commit all zones in VSAN ${vsan} to the switch? A pre-commit snapshot will be created.`)) return;
+  toast('Committing zones...','info');
+  const res = JSON.parse(await call('commit_zones', currentSwitch.id, currentSwitch.ip_address, vsan, currentUser.username));
+  if (res.ok) { toast('Zones committed to switch!','success'); await zoning(); }
+  else toast(res.error,'error');
+}
+
+async function pullZones() {
+  const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
+  toast('Pulling zones from switch...','info');
+  const res = JSON.parse(await call('pull_zones', currentSwitch.id, currentSwitch.ip_address, vsan));
+  if (res.ok) { toast(`Pulled . ${res.imported} new zones`,'success'); await zoning(); }
+  else toast(res.error,'error');
+}
+
+async function takeSnapshot() {
+  const res = JSON.parse(await call('take_snapshot', currentSwitch.id, currentUser.username));
+  if (res.ok) toast('Snapshot created','success');
+  else toast(res.error,'error');
+}
+
+// -- FABRIC --------------------------------------------------------------------
+async function fabric() {
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+  var switchVsans = [];
+  try { switchVsans = JSON.parse(await call('get_switch_vsans', currentSwitch.id)); } catch(e) {}
+  var vsanIds = switchVsans.length ? switchVsans.map(function(v){return v.vsan_id;}) : [100,200,300];
+  var fabVsanOpts = vsanIds.map(function(v){return '<option value="'+v+'">VSAN '+v+'</option>';}).join('');
+  var fabActions =
+    '<label class="text-xs text-tx-dim">VSAN:</label>' +
+    '<select id="fab-vsan" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx w-28">' +
+    fabVsanOpts + '</select>' +
+    H.btnSec('Sync VSANs','syncVsansFromFabric()') +
+    H.btnSec('Refresh','loadFcns()');
+  setPage(
+    H.page('Fabric Discovery','FCNS name server database', fabActions) +
+    '<div id="fcns-content" class="flex items-center justify-center h-32 text-tx-dim text-sm">' +
+    '<div class="spin border-2 border-brand border-t-transparent rounded-full w-4 h-4 mr-2"></div>Loading...</div>'
+  );
+  await loadFcns();
+}
+
+async function syncVsansFromFabric() {
+  if (!currentSwitch) return;
+  try {
+    var res = JSON.parse(await call('sync_vsans', currentSwitch.id, currentSwitch.ip_address));
+    if (res.ok) { toast('Discovered ' + res.count + ' VSAN(s)', 'success'); await fabric(); }
+    else toast(res.error, 'error');
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+async function loadFcns() {
+  const vsan = parseInt(document.getElementById('fab-vsan')?.value || 100);
+  const res = JSON.parse(await call('get_fcns', currentSwitch.id, currentSwitch.ip_address, vsan));
+  const container = document.getElementById('fcns-content');
+  if (!res.ok) { container.className = ''; container.innerHTML = `<p class="text-err text-sm">${res.error}</p>`; return; }
+  container.className = '';
+  const entries = res.entries;
+  container.innerHTML = H.card(H.table(
+    ['pWWN','FCID','Vendor','FC4 Type','Interface','Symbolic Name'],
+    entries.map(e=>[
+      `<code class="mono text-[11px]">${e.pwwn}</code>`,
+      `<code class="mono text-[11px] text-brand">${e.fcid}</code>`,
+      escHtml(e.vendor||'--'), escHtml(e.fc4_types||'--'),
+      escHtml(e.connected_interface||'--'), escHtml(e.symbolic_port_name||'--'),
+    ]),
+    'No FCNS entries'
+  ));
+}
+
+// -- INVENTORY -----------------------------------------------------------------
+async function inventory() {
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+  var invActions =
+    '<input id="inv-search" oninput="filterInv(this.value)" placeholder="Search..." class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx focus:outline-none focus:border-brand w-40">' +
+    '<select id="inv-status" onchange="filterInv(document.getElementById(\'inv-search\').value)" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx">' +
+    '<option value="">All States</option><option>up</option><option>down</option><option>trunking</option></select>' +
+    H.btnSec('Refresh','inventory()');
+  setPage(
+    H.page('Port Inventory','FC interface list with state, speed, and WWN', invActions) +
+    '<div id="inv-content" class="flex items-center justify-center h-32 text-tx-dim text-sm">' +
+    '<div class="spin border-2 border-brand border-t-transparent rounded-full w-4 h-4 mr-2"></div>Loading...</div>'
+  );
+
+  const res = JSON.parse(await call('get_inventory', currentSwitch.id, currentSwitch.ip_address));
+  const container = document.getElementById('inv-content');
+  if (!res.ok) { container.innerHTML = `<p class="text-err text-sm">${res.error}</p>`; return; }
+  window._invPorts = res.ports;
+  renderInvTable(res.ports);
+}
+
+function filterInv(q) {
+  const sf = document.getElementById('inv-status')?.value || '';
+  let ports = window._invPorts || [];
+  if (q) ports = ports.filter(p => p.name.toLowerCase().includes(q.toLowerCase()) || (p.peer_wwn||'').includes(q.toLowerCase()) || (p.alias||'').toLowerCase().includes(q.toLowerCase()));
+  if (sf) ports = ports.filter(p => p.state === sf);
+  renderInvTable(ports);
+}
+
+function renderInvTable(ports) {
+  const stateColor = {up:'green',trunking:'green',down:'red',isolated:'yellow'};
+  var invContainer = document.getElementById('inv-content');
+  invContainer.className = '';
+  invContainer.innerHTML = H.card(H.table(
+    ['Interface','State','Mode','Speed','VSAN','Peer WWN','Alias'],
+    ports.map(p=>[
+      `<code class="mono font-medium">${p.name}</code>`,
+      H.badge(p.state.toUpperCase(), stateColor[p.state]||'blue'),
+      p.mode, p.speed?`${parseInt(p.speed)>1000?parseInt(p.speed)/1000+'G':p.speed}`:'--',
+      p.vsan||'--',
+      p.peer_wwn ? `<code class="mono text-[11px] text-tx-dim">${p.peer_wwn}</code>` : '--',
+      escHtml(p.alias||'--'),
+    ]),
+    'No FC interfaces found'
+  ));
+}
+
+// -- SFP -----------------------------------------------------------------------
+async function sfp() {
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+  setPage(
+    H.page('SFP Health','Transceiver diagnostics -- optical power, temperature, voltage',
+      H.btnSec('Refresh','sfp()')) +
+    '<div id="sfp-content" class="flex items-center justify-center h-32 text-tx-dim text-sm">' +
+    '<div class="spin border-2 border-brand border-t-transparent rounded-full w-4 h-4 mr-2"></div>Loading...</div>'
+  );
+
+  const res = JSON.parse(await call('get_sfp', currentSwitch.id, currentSwitch.ip_address));
+  const container = document.getElementById('sfp-content');
+  if (!res.ok) { container.className = ''; container.innerHTML = `<p class="text-err text-sm">${res.error}</p>`; return; }
+  container.className = '';
+  const xcvrs = res.xcvrs;
+
+  function pColor(v, warn, crit) {
+    if (v===null||v===undefined) return 'blue';
+    if (v < crit) return 'red'; if (v < warn) return 'yellow'; return 'green';
+  }
+  function fmt(v,d=2) { return v!=null ? v.toFixed(d) : '--'; }
+
+  container.innerHTML = `
+    <div class="grid grid-cols-4 gap-3">
+      ${xcvrs.map(x => `
+        ${H.card(`
+          <div class="px-4 py-3 border-b border-border flex items-center justify-between">
+            <span class="font-semibold text-sm">${x.interface}</span>
+            ${H.badge('Present','green')}
+          </div>
+          <div class="px-4 py-3 space-y-2">
+            <div class="flex justify-between text-xs">
+              <span class="text-tx-dim">RX Power</span>
+              ${H.badge(fmt(x.rx_power_dbm)+' dBm', pColor(x.rx_power_dbm,-10,-14))}
+            </div>
+            <div class="flex justify-between text-xs">
+              <span class="text-tx-dim">TX Power</span>
+              ${H.badge(fmt(x.tx_power_dbm)+' dBm', pColor(x.tx_power_dbm,-2,-6))}
+            </div>
+            <div class="flex justify-between text-xs">
+              <span class="text-tx-dim">Temperature</span>
+              ${H.badge(fmt(x.temperature,1)+' degC', pColor(x.temperature ? -x.temperature : null,-(-65),-(-75)))}
+            </div>
+            <div class="flex justify-between text-xs">
+              <span class="text-tx-dim">Voltage</span>
+              <span class="text-tx font-mono">${fmt(x.voltage,3)} V</span>
+            </div>
+            <div class="flex justify-between text-xs">
+              <span class="text-tx-dim">Current</span>
+              <span class="text-tx font-mono">${fmt(x.current_ma)} mA</span>
+            </div>
+          </div>
+        `)}
+      `).join('')}
+    </div>
+  `;
+}
+
+// -- PERFORMANCE ---------------------------------------------------------------
+async function performance() {
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+  const [topPorts, interfaces] = await Promise.all([
+    call('get_top_ports', currentSwitch.id).then(JSON.parse),
+    call('get_interfaces', currentSwitch.id).then(JSON.parse),
+  ]);
+
+  const ifaceOpts = interfaces.map(i=>`<option value="${i}">${i}</option>`).join('');
+
+  setPage(`
+    ${H.page('Performance','Port throughput and optical power history')}
+    <div class="grid grid-cols-2 gap-3 mb-3">
+      <!-- Top ports bar chart -->
+      ${H.card(`
+        ${H.cardHeader('Top Ports by Throughput')}
+        <div class="p-4">
+          <canvas id="top-chart" height="200"></canvas>
+        </div>
+      `)}
+      <!-- Port history -->
+      ${H.card(`
+        ${H.cardHeader('Port History')}
+        <div class="px-4 py-3 border-b border-border flex gap-2 items-center">
+          <select id="perf-port" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx w-28">${ifaceOpts}</select>
+          <select id="perf-win" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx w-20">
+            <option value="50">1h</option><option value="200">6h</option>
+            <option value="500" selected>24h</option>
+          </select>
+          ${H.btn('Load','loadPortHistory()')}
+        </div>
+        <div class="p-4"><canvas id="hist-chart" height="200"></canvas></div>
+      `)}
+    </div>
+    <!-- RX Power trend -->
+    ${H.card(`
+      ${H.cardHeader('Optical Power Trend (RX + TX)')}
+      <div class="p-4"><canvas id="pwr-chart" height="120"></canvas></div>
+    `)}
+  `);
+
+  // Top ports bar chart
+  const labels = topPorts.map(p=>p.interface_name);
+  const txData  = topPorts.map(p=>(p.avg_tx||0)/1e6);
+  const rxData  = topPorts.map(p=>(p.avg_rx||0)/1e6);
+
+  const chartDefaults = {
+    responsive: true,
+    plugins: { legend:{ labels:{ color:'#6b7899', font:{size:11} } } },
+    scales: {
+      x: { ticks:{color:'#6b7899',font:{size:10}}, grid:{color:'#252a3d'} },
+      y: { ticks:{color:'#6b7899',font:{size:10}}, grid:{color:'#252a3d'} },
+    }
+  };
+
+  charts.top = new Chart(document.getElementById('top-chart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label:'TX Mbps', data:txData,  backgroundColor:'#3b7eff99', borderRadius:3 },
+        { label:'RX Mbps', data:rxData,  backgroundColor:'#1db95499', borderRadius:3 },
+      ]
+    },
+    options: { ...chartDefaults, plugins:{...chartDefaults.plugins} }
+  });
+
+  charts.hist = new Chart(document.getElementById('hist-chart'), {
+    type: 'line',
+    data: { labels:[], datasets:[
+      { label:'TX Mbps', data:[], borderColor:'#3b7eff', backgroundColor:'#3b7eff22', tension:0.3, pointRadius:0, fill:true },
+      { label:'RX Mbps', data:[], borderColor:'#1db954', backgroundColor:'#1db95422', tension:0.3, pointRadius:0, fill:true },
+    ]},
+    options: chartDefaults
+  });
+
+  charts.pwr = new Chart(document.getElementById('pwr-chart'), {
+    type: 'line',
+    data: { labels:[], datasets:[
+      { label:'RX Power dBm', data:[], borderColor:'#8b5cf6', backgroundColor:'#8b5cf622', tension:0.3, pointRadius:0, fill:false },
+      { label:'TX Power dBm', data:[], borderColor:'#06b6d4', backgroundColor:'#06b6d422', tension:0.3, pointRadius:0, fill:false, borderDash:[4,3] },
+    ]},
+    options: { ...chartDefaults,
+      plugins:{ ...chartDefaults.plugins }
+    }
+  });
+
+  await loadPortHistory();
+}
+
+async function loadPortHistory() {
+  const port  = document.getElementById('perf-port')?.value;
+  const limit = parseInt(document.getElementById('perf-win')?.value || 500);
+  if (!port || !currentSwitch) return;
+
+  const rows = JSON.parse(await call('get_port_history', currentSwitch.id, port, limit));
+  const labels = rows.map((_, i) => i);
+  const tx = rows.map(r=>(r.tx_rate_bps||0)/1e6);
+  const rx = rows.map(r=>(r.rx_rate_bps||0)/1e6);
+  const rxPwr = rows.map(r=>r.rx_power_dbm);
+  const txPwr = rows.map(r=>r.tx_power_dbm);
+
+  if (charts.hist) {
+    charts.hist.data.labels = labels;
+    charts.hist.data.datasets[0].data = tx;
+    charts.hist.data.datasets[1].data = rx;
+    charts.hist.update();
+  }
+  if (charts.pwr) {
+    charts.pwr.data.labels = labels;
+    charts.pwr.data.datasets[0].data = rxPwr;
+    charts.pwr.data.datasets[1].data = txPwr;
+    charts.pwr.update();
+  }
+}
+
+// -- SNAPSHOTS -----------------------------------------------------------------
+async function snapshots() {
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+  const data = JSON.parse(await call('get_snapshots', currentSwitch.id));
+  window._snapData = data;
+
+  const trigColors = { PRE_COMMIT:'purple', MANUAL:'blue', SCHEDULED:'green' };
+  const rows = data.map((s,i)=>[
+    fmtDate(s.created_at),
+    s.vsan_id||'All',
+    H.badge(s.trigger||'MANUAL', trigColors[s.trigger]||'blue'),
+    escHtml(s.triggered_by||'--'),
+    `<div class="flex gap-1.5">
+      ${H.btnSec('View',`viewSnapshot('${s.id}')`)}
+      ${H.btnSec('Restore',`restoreSnapshot('${s.id}')`)}
+    </div>`,
+  ]);
+
+  setPage(`
+    ${H.page('Snapshots','Versioned zoning configuration history',
+      H.btn(' Take Snapshot',`doTakeSnapshot()`)
+    )}
+    ${H.card(H.table(['Date / Time','VSAN','Trigger','By','Actions'],rows,'No snapshots yet'))}
+  `);
+}
+
+async function viewSnapshot(id) {
+  const payload = await call('get_snapshot_payload', id);
+  showModal('Snapshot Payload', `
+    <pre class="mono text-[11px] text-tx-dim overflow-auto max-h-96 bg-surface-2 rounded p-3">${escHtml(JSON.stringify(JSON.parse(payload),null,2))}</pre>
+  `);
+}
+
+async function restoreSnapshot(id) {
+  if (!confirm('Restore this snapshot as draft zones? Existing drafts will be replaced.')) return;
+  const res = JSON.parse(await call('restore_snapshot', id, currentSwitch.id));
+  if (res.ok) toast('Snapshot restored as draft zones','success');
+  else toast(res.error,'error');
+}
+
+async function doTakeSnapshot() {
+  const res = JSON.parse(await call('take_snapshot', currentSwitch.id, currentUser.username));
+  if (res.ok) { toast('Snapshot created','success'); await snapshots(); }
+  else toast(res.error,'error');
+}
+
+// -- USERS ---------------------------------------------------------------------
+async function users() {
+  const data = JSON.parse(await call('get_users'));
+  window._usersData = data;
+  const roleColors = { ADMIN:'purple', OPERATOR:'blue', VIEWER:'green' };
+
+  const rows = data.map(u=>[
+    `<span class="font-medium">${escHtml(u.username)}</span>`,
+    escHtml(u.email),
+    H.badge(u.role, roleColors[u.role]||'blue'),
+    u.is_active ? H.badge('Active','green') : H.badge('Disabled','red'),
+    fmtDate(u.last_login_at),
+    `<div class="flex gap-1.5">
+      ${H.btnSec('Edit',`editUser('${u.id}')`)}
+      ${u.id !== currentUser?.id ? H.btnDanger('',`deleteUser('${u.id}','${escHtml(u.username)}')`) : ''}
+    </div>`,
+  ]);
+
+  setPage(`
+    ${H.page('User Management','Platform users, roles and access control',
+      H.btn(' Add User','showAddUser()')
+    )}
+    ${H.card(H.table(['Username','Email','Role','Status','Last Login','Actions'],rows,'No users'))}
+  `);
+}
+
+function showAddUser() {
+  showModal('Add User', userForm(null));
+}
+
+async function editUser(id) {
+  const user = window._usersData.find(u=>u.id===id);
+  if (!user) return;
+  showModal('Edit User', userForm(user));
+}
+
+function userForm(user) {
+  return `<div class="space-y-3">
+    ${H.formRow('Username *', H.input('m-u-username','',user?.username||''))}
+    ${H.formRow('Email *', H.input('m-u-email','user@example.com',user?.email||''))}
+    ${H.formRow('Password '+(user?'(leave blank to keep)':'*'), H.input('m-u-pw','','','password'))}
+    ${H.formRow('Role *', H.select('m-u-role',[['ADMIN','Admin'],['OPERATOR','Operator'],['VIEWER','Viewer']],user?.role||'OPERATOR'))}
+    <div id="m-u-err" class="text-err text-xs hidden"></div>
+    <div class="flex gap-2 pt-1">
+      ${H.btn('Save',`saveUser('${user?.id||''}')`)}
+      ${H.btnSec('Cancel','closeModal()')}
+    </div>
+  </div>`;
+}
+
+async function saveUser(id) {
+  const username = document.getElementById('m-u-username').value.trim();
+  const email    = document.getElementById('m-u-email').value.trim();
+  const pw       = document.getElementById('m-u-pw').value;
+  const role     = document.getElementById('m-u-role').value;
+  const errEl    = document.getElementById('m-u-err');
+  if (!email) { errEl.textContent='Email required'; errEl.classList.remove('hidden'); return; }
+  if (!id && !pw) { errEl.textContent='Password required'; errEl.classList.remove('hidden'); return; }
+
+  let res;
+  if (id) res = JSON.parse(await call('update_user', id, email, role, pw));
+  else    res = JSON.parse(await call('create_user', email, username, pw, role));
+
+  if (res.ok) { closeModal(); toast(id?'User updated':'User created','success'); await users(); }
+  else { errEl.textContent=res.error; errEl.classList.remove('hidden'); }
+}
+
+async function deleteUser(id, name) {
+  if (!confirm(`Delete user '${name}'?`)) return;
+  const res = JSON.parse(await call('delete_user', id));
+  if (res.ok) { toast('User deleted'); await users(); }
+  else toast(res.error,'error');
+}
+
+// -- SETTINGS ------------------------------------------------------------------
+async function settings() {
+  var cfg, switches, stats;
+  try { cfg = JSON.parse(await call('get_settings')); } catch(e) { cfg = {}; }
+  try { switches = JSON.parse(await call('get_switches')); } catch(e) { switches = []; }
+  try { stats = JSON.parse(await call('get_db_stats')); } catch(e) { stats = {}; }
+  window._simEnabled = cfg.simulate_mode === 'true';
+
+  // Build switch rows
+  var swRows = switches.map(function(s) {
+    return [
+      '<code class="font-mono text-xs">' + escHtml(s.ip_address) + '</code>',
+      escHtml(s.display_name || '--'),
+      escHtml(s.hostname || '--'),
+      escHtml(s.model || '--'),
+      escHtml(s.nxos_version || '--'),
+      '<div class="flex gap-1.5">' +
+        H.btnSec('Edit', 'editSwitch(\'' + s.id + '\')') +
+        H.btnDanger('Delete', 'deleteSw(\'' + s.id + '\',\'' + escHtml(s.display_name||s.ip_address) + '\')') +
+      '</div>',
+    ];
+  });
+
+  setPage(
+    H.page('Settings', 'Platform configuration, database management, and backup/restore') +
+
+    // -- Switches section
+    H.card(
+      H.cardHeader('Switches') +
+      '<div class="px-4 py-3 border-b border-border">' +
+        H.btn('+ Add Switch', 'showAddSwitch()') +
+      '</div>' +
+      H.table(['IP','Display Name','Hostname','Model','NX-OS','Actions'], swRows, 'No switches registered') +
+      '<div class="px-4 py-3 border-t border-border">' +
+        H.btnSec('Switch settings', 'showSwitchSettings()') +
+      '</div>',
+      'mb-4'
+    ) +
+
+    // -- Feature flags
+    H.card(
+      H.cardHeader('Feature Flags') +
+      '<div class="p-4 space-y-5">' +
+        '<div class="flex items-center justify-between">' +
+          '<div>' +
+            '<div class="text-sm font-medium">MDS 9000 Simulator</div>' +
+            '<div class="text-xs text-tx-dim mt-0.5">Use built-in simulator instead of real NX-API calls. Safe for testing.</div>' +
+          '</div>' +
+          '<div id="sim-toggle" onclick="toggleSim()" class="relative w-11 h-6 rounded-full cursor-pointer transition-colors ' + (cfg.simulate_mode==='true' ? 'bg-brand' : 'bg-surface-3') + '">' +
+            '<div class="absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ' + (cfg.simulate_mode==='true' ? 'translate-x-5' : '') + '"></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="flex items-center gap-3 pt-2 border-t border-border">' +
+          '<label class="text-sm text-tx-dim w-40">Poll interval (seconds)</label>' +
+          '<input id="poll-interval" type="number" min="10" max="3600" value="' + (cfg.poll_interval_sec||60) + '" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx w-24 focus:outline-none focus:border-brand">' +
+        '</div>' +
+        '<div>' + H.btn('Save Settings', 'saveSettings()') + '</div>' +
+      '</div>',
+      'mb-4'
+    ) +
+
+    // -- Database statistics
+    H.card(
+      H.cardHeader('Database Statistics') +
+      '<div class="p-4">' +
+        '<div class="grid grid-cols-3 gap-3 mb-3">' +
+          ['Switches:' + (stats.switches||0), 'FC Aliases:' + (stats.aliases||0), 'Zones:' + (stats.zones||0),
+           'Zone Sets:' + (stats.zone_sets||0), 'Snapshots:' + (stats.snapshots||0), 'Users:' + (stats.users||0)].map(function(kv) {
+            var parts = kv.split(':');
+            return '<div class="bg-surface-2 rounded p-3"><div class="text-[10px] text-tx-muted uppercase tracking-wide">' + parts[0] + '</div><div class="text-xl font-bold text-tx mt-1">' + parts[1] + '</div></div>';
+          }).join('') +
+        '</div>' +
+        '<div class="bg-surface-2 rounded p-3 flex items-center justify-between">' +
+          '<div><div class="text-[10px] text-tx-muted uppercase tracking-wide">Port Metric Rows</div><div class="text-xl font-bold text-tx mt-1">' + (stats.metrics||0).toLocaleString() + '</div></div>' +
+          H.btnDanger('Purge old metrics', 'purgeMetrics()') +
+        '</div>' +
+      '</div>',
+      'mb-4'
+    ) +
+
+    // -- Backup & Restore
+    H.card(
+      H.cardHeader('Backup & Restore') +
+      '<div class="p-4 space-y-4">' +
+        '<div class="flex items-start justify-between">' +
+          '<div>' +
+            '<div class="text-sm font-medium">Export backup</div>' +
+            '<div class="text-xs text-tx-dim mt-0.5">Download a JSON file with all switches, aliases, zones, zone sets, and snapshots.</div>' +
+          '</div>' +
+          H.btn('Download Backup', 'exportBackup()') +
+        '</div>' +
+        '<div class="border-t border-border pt-4 flex items-start justify-between">' +
+          '<div>' +
+            '<div class="text-sm font-medium">Restore from backup</div>' +
+            '<div class="text-xs text-tx-dim mt-0.5">Records are merged (upserted). Existing data is not deleted.</div>' +
+          '</div>' +
+          H.btnSec('Select backup file...', 'importBackup()') +
+        '</div>' +
+      '</div>',
+      'mb-4'
+    ) +
+
+    // -- DB info
+    H.card(
+      H.cardHeader('Database') +
+      '<div class="p-4 space-y-2">' +
+        '<div class="flex items-center gap-2">' +
+          '<span class="text-xs text-tx-dim w-20">Path</span>' +
+          '<span id="db-path-label" class="text-xs font-mono text-tx break-all">Loading...</span>' +
+        '</div>' +
+        '<div class="flex items-center gap-2">' +
+          '<span class="text-xs text-tx-dim w-20">Size</span>' +
+          '<span id="db-size-label" class="text-xs text-tx">--</span>' +
+        '</div>' +
+      '</div>'
+    )
+  );
+
+  // Load DB path and size
+  try {
+    var dbPath = await call('get_db_path');
+    var pathEl = document.getElementById('db-path-label');
+    if (pathEl) pathEl.textContent = dbPath;
+  } catch(e) {
+    var pathEl = document.getElementById('db-path-label');
+    if (pathEl) pathEl.textContent = 'Error: ' + String(e);
+  }
+}
+
+function toggleSim() {
+  window._simEnabled = !window._simEnabled;
+  var tog = document.getElementById('sim-toggle');
+  var dot = tog.querySelector('div');
+  if (window._simEnabled) {
+    tog.classList.replace('bg-surface-3','bg-brand');
+    dot.classList.add('translate-x-5');
+  } else {
+    tog.classList.replace('bg-brand','bg-surface-3');
+    dot.classList.remove('translate-x-5');
+  }
+}
+
+async function saveSettings() {
+  await call('set_setting','simulate_mode', window._simEnabled?'true':'false');
+  var poll = document.getElementById('poll-interval').value;
+  await call('set_setting','poll_interval_sec', poll);
+  toast('Settings saved','success');
+  await checkSimMode();
+}
+
+async function exportBackup() {
+  try {
+    toast('Preparing backup...', 'info');
+    var json = await call('export_backup');
+    // Use Python native Save dialog -- Blob downloads are blocked in embedded WebEngine
+    var res = JSON.parse(await call('save_backup_file', json));
+    if (res.cancelled) {
+      toast('Backup cancelled', 'info');
+    } else if (res.ok) {
+      toast('Backup saved to: ' + res.path, 'success');
+    } else {
+      toast('Error: ' + res.error, 'error');
+    }
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+async function importBackup() {
+  var input = document.createElement('input');
+  input.type = 'file'; input.accept = '.json';
+  input.onchange = async function() {
+    var file = input.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = async function(e) {
+      if (!confirm('Import backup? Records will be merged (existing data preserved).')) return;
+      try {
+        var res = JSON.parse(await call('import_backup', e.target.result));
+        if (res.ok) { toast('Backup imported successfully','success'); await settings(); }
+        else toast(res.error,'error');
+      } catch(err) { toast(String(err),'error'); }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+async function purgeMetrics() {
+  if (!confirm('Purge ALL port metric rows? This cannot be undone.')) return;
+  try {
+    var res = JSON.parse(await call('purge_metrics'));
+    if (res.ok) { toast('Metrics purged: ' + res.deleted + ' rows deleted','success'); await settings(); }
+    else toast(res.error,'error');
+  } catch(e) { toast(String(e),'error'); }
+}
+
+async function editSwitch(id) {
+  var sw = (JSON.parse(await call('get_switch', id)));
+  var vsans = [];
+  try { vsans = JSON.parse(await call('get_switch_vsans', id)); } catch(e) {}
+
+  var vsanRows = vsans.length
+    ? vsans.map(function(v) {
+        return '<div class="flex items-center justify-between border-b border-border py-1.5 text-xs">' +
+          '<span class="font-mono">VSAN ' + v.vsan_id + '</span>' +
+          '<span class="text-tx-dim">' + escHtml(v.name||'') + '</span>' +
+          H.badge((v.state||'active').toUpperCase(), v.state==='active'?'green':'yellow') +
+        '</div>';
+      }).join('')
+    : '<p class="text-xs text-tx-dim">No VSANs discovered yet -- click Sync VSANs below.</p>';
+
+  showModal('Switch Settings',
+    '<div class="space-y-5">' +
+    '<div>' +
+    '<div class="text-xs font-bold text-tx-muted uppercase tracking-wide mb-1">Switch Identity</div>' +
+    '<p class="text-xs text-tx-dim mb-3">Display name and notes are stored locally -- they do not affect the switch configuration.</p>' +
+    H.formRow('Display name (shown in selector)', H.input('m-sw-edit-name','Upper Switch, Cisco-01...',sw.display_name||'')) +
+    '<p class="text-xs text-tx-muted mt-1">e.g. "Upper Switch", "Cisco-01", "SAN-A Spine"</p>' +
+    '</div>' +
+    '<div>' +
+    H.formRow('Operator notes', '<textarea id="m-sw-edit-notes" rows="3" placeholder="Maintenance windows, rack location, connected storage, etc." class="w-full bg-surface-2 border border-border rounded px-3 py-2 text-xs text-tx focus:outline-none focus:border-brand resize-none">' + escHtml(sw.notes||'') + '</textarea>') +
+    '</div>' +
+    H.btn('Save changes', 'saveSwitch(\'' + id + '\')') +
+    '<div class="border-t border-border pt-4">' +
+    '<div class="text-xs font-bold text-tx-muted uppercase tracking-wide mb-3">Hardware Information</div>' +
+    '<div class="space-y-2">' +
+    ['IP address:' + (sw.ip_address||'--'), 'Hostname:' + (sw.hostname||'--'), 'Model:' + (sw.model||'--'),
+     'Serial number:' + (sw.serial_number||'--'), 'NX-OS version:' + (sw.nxos_version||'--'),
+     'Status:Active', 'Last seen:' + (sw.last_seen_at ? new Date(sw.last_seen_at).toLocaleString() : '--'),
+     'Registered:' + (sw.created_at ? new Date(sw.created_at).toLocaleString() : '--')
+    ].map(function(kv) {
+      var parts = kv.split(':'); var k = parts.shift(); var v = parts.join(':');
+      return '<div class="flex border-b border-border pb-1.5"><span class="text-xs text-tx-dim w-32 flex-shrink-0">' + k + '</span><span class="text-xs font-medium">' + escHtml(v) + '</span></div>';
+    }).join('') +
+    '</div></div>' +
+    '<div class="border-t border-border pt-4">' +
+    '<div class="text-xs font-bold text-tx-muted uppercase tracking-wide mb-1">Stored Data</div>' +
+    '<div class="grid grid-cols-3 gap-2 mt-2">' +
+    [['FC aliases', sw.alias_count||0],['Zones', sw.zone_count||0],['Zone sets', sw.zone_set_count||0],
+     ['Snapshots', sw.snapshots||0],['Metric rows', sw.metric_count||0]].map(function(kv) {
+      return '<div class="bg-surface-2 rounded p-2"><div class="text-[10px] text-tx-muted uppercase">' + kv[0] + '</div><div class="text-lg font-bold mt-0.5">' + kv[1] + '</div></div>';
+    }).join('') +
+    '</div></div>' +
+    '<div class="border-t border-border pt-4">' +
+    '<div class="flex items-center justify-between mb-1">' +
+      '<div class="text-xs font-bold text-tx-muted uppercase tracking-wide">VSANs</div>' +
+      H.btnSec('Sync VSANs', 'syncVsansFromModal(\'' + id + '\',\'' + sw.ip_address + '\')') +
+    '</div>' +
+    '<div id="m-sw-vsans" class="space-y-0.5">' + vsanRows + '</div>' +
+    '</div>' +
+    '<div class="border-t border-border pt-4">' +
+    '<div class="text-xs font-bold text-tx-muted uppercase tracking-wide mb-1">NX-API Credentials</div>' +
+    '<p class="text-xs text-tx-dim mb-3">Update stored credentials if the switch password has changed.</p>' +
+    '<div class="grid grid-cols-2 gap-3">' +
+    H.formRow('Username', H.input('m-sw-cred-user','admin','admin')) +
+    H.formRow('Port', H.input('m-sw-cred-port','8443','8443')) +
+    '</div>' +
+    H.formRow('New password', H.input('m-sw-cred-pass','Enter new switch password','','password')) +
+    '<div class="mt-3">' + H.btnSec('Update credentials', 'updateCredentials(\'' + id + '\')') + '</div>' +
+    '</div>' +
+    '</div>',
+    'lg'
+  );
+}
+
+async function syncVsansFromModal(id, ip) {
+  try {
+    var res = JSON.parse(await call('sync_vsans', id, ip));
+    if (res.ok) {
+      toast('Discovered ' + res.count + ' VSAN(s)', 'success');
+      editSwitch(id);
+    } else {
+      toast(res.error, 'error');
+    }
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+async function saveSwitch(id) {
+  var name  = document.getElementById('m-sw-edit-name').value.trim();
+  var notes = document.getElementById('m-sw-edit-notes').value.trim();
+  var res = JSON.parse(await call('update_switch', id, name, notes));
+  if (res.ok) { toast('Switch updated','success'); closeModal(); await settings(); await refreshSwitches(); }
+  else toast(res.error,'error');
+}
+
+async function updateCredentials(id) {
+  var sw = JSON.parse(await call('get_switch', id));
+  var user = document.getElementById('m-sw-cred-user').value.trim();
+  var port = document.getElementById('m-sw-cred-port').value.trim() || '8443';
+  var pass = document.getElementById('m-sw-cred-pass').value;
+  if (!pass) { toast('Enter a new password','error'); return; }
+  var res = JSON.parse(await call('store_switch_credentials', id, sw.ip_address, user, pass, port));
+  if (res.ok) { toast('Credentials updated','success'); }
+  else toast(res.error,'error');
+}
+
+async function showSwitchSettings() {
+  var switches = JSON.parse(await call('get_switches'));
+  if (switches.length === 1) { editSwitch(switches[0].id); return; }
+  if (switches.length === 0) { toast('No switches registered','error'); return; }
+  // Show picker
+  showModal('Select Switch',
+    '<div class="space-y-2">' +
+    switches.map(function(s) {
+      return '<button onclick="closeModal();editSwitch(\'' + s.id + '\')" class="w-full text-left p-3 rounded border border-border hover:border-brand hover:bg-surface-2 transition-colors">' +
+        '<div class="font-medium text-sm">' + escHtml(s.display_name||s.hostname||s.ip_address) + '</div>' +
+        '<div class="text-xs text-tx-dim">' + escHtml(s.ip_address) + ' . ' + escHtml(s.model||'Unknown model') + '</div>' +
+      '</button>';
+    }).join('') +
+    '</div>'
+  );
+}
+
+async function deleteSw(id, name) {
+  if (!confirm('Delete switch \'' + name + '\' and ALL associated data? Cannot be undone.')) return;
+  var res = JSON.parse(await call('delete_switch', id));
+  if (res.ok) { toast('Switch deleted'); await refreshSwitches(); await settings(); }
+  else toast(res.error,'error');
+}
+
+
+async function saveNewSwitch() {
+  var ip    = document.getElementById('m-sw-ip').value.trim();
+  var name  = document.getElementById('m-sw-name').value.trim();
+  var user  = document.getElementById('m-sw-user').value.trim();
+  var pass  = document.getElementById('m-sw-pass').value;
+  var port  = document.getElementById('m-sw-port').value.trim() || '8443';
+  var notes = document.getElementById('m-sw-notes').value.trim();
+  var errEl = document.getElementById('m-sw-err');
+  if (!ip) { errEl.textContent='IP address is required'; errEl.classList.remove('hidden'); return; }
+  var info = window._swVerifiedInfo || {};
+  var res = JSON.parse(await call('create_switch',
+    ip,
+    info.hostname || '',
+    name || info.hostname || ip,
+    info.model || '',
+    info.serial_number || '',
+    notes
+  ));
+  if (!res.ok) { errEl.textContent=res.error; errEl.classList.remove('hidden'); return; }
+  if (user && pass) {
+    await call('store_switch_credentials', res.switch.id, ip, user, pass, port);
+  }
+  closeModal();
+  toast('Switch added -- discovering VSANs...', 'success');
+  await refreshSwitches();
+  // Auto-discover VSANs right after adding the switch
+  try {
+    var vres = JSON.parse(await call('sync_vsans', res.switch.id, ip));
+    if (vres.ok) toast('Discovered ' + vres.count + ' VSAN(s)', 'success');
+  } catch(e) {}
+  await settings();
+}
+
+async function showAddSwitch() {
+  showModal('Add Switch', `
+    <div class="space-y-3">
+      ${H.formRow('IP Address *', H.input('m-sw-ip','192.168.1.100'))}
+      ${H.formRow('Display Name', H.input('m-sw-name','e.g. Upper Switch'))}
+      <div class="grid grid-cols-2 gap-3">
+        <div>${H.formRow('NX-API Username', H.input('m-sw-user','admin'))}</div>
+        <div>${H.formRow('NX-API Port', H.input('m-sw-port','8443','8443'))}</div>
+      </div>
+      ${H.formRow('NX-API Password', H.input('m-sw-pass','','','password'))}
+      ${H.formRow('Notes', H.input('m-sw-notes','Optional notes'))}
+      ${H.btnSec('Test Connection','testSwConn()')}
+      <div id="m-sw-test-result" class="text-xs hidden"></div>
+      <div id="m-sw-err" class="text-err text-xs hidden"></div>
+      <div class="flex gap-2 pt-1">
+        ${H.btn('Add Switch','saveNewSwitch()')}
+        ${H.btnSec('Cancel','closeModal()')}
+      </div>
+    </div>
+  `);
+  window._swVerifiedInfo = {};
+}
+
+async function testSwConn() {
+  const ip   = document.getElementById('m-sw-ip').value.trim();
+  const user = document.getElementById('m-sw-user').value.trim();
+  const pass = document.getElementById('m-sw-pass').value;
+  const port = document.getElementById('m-sw-port').value.trim() || '8443';
+  const resultEl = document.getElementById('m-sw-test-result');
+  resultEl.textContent = 'Testing...';
+  resultEl.className = 'text-xs text-tx-dim';
+  resultEl.classList.remove('hidden');
+  // Create a temp switch to test
+  const temp = JSON.parse(await call('create_switch', ip, '', '', '', '', 'test-temp'));
+  if (!temp.ok) { resultEl.textContent='Could not create test: '+temp.error; resultEl.className='text-xs text-err'; return; }
+  await call('store_switch_credentials', temp.switch.id, ip, user, pass, port);
+  const res = JSON.parse(await call('test_switch_connection', temp.switch.id, ip));
+  await call('delete_switch', temp.switch.id);
+  if (res.ok) {
+    window._swVerifiedInfo = res.info;
+    resultEl.textContent = 'OK: ' + res.info.hostname + ' -- ' + res.info.model + ' -- NX-OS ' + res.info.nxos_version;
+    resultEl.className = 'text-xs text-ok';
+    if (!document.getElementById('m-sw-name').value && res.info.hostname)
+      document.getElementById('m-sw-name').value = res.info.hostname;
+  } else {
+    resultEl.textContent = 'Error: ' + res.error;
+    resultEl.className = 'text-xs text-err';
+  }
+}
+// -- SIMULATOR SETTINGS (per-port) -------------------------------------------
+var _simPorts = [];
+var _simIp    = '';
+
+async function simulatorSettings() {
+  // Get active switch IP
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+  _simIp = currentSwitch.ip_address;
+
+  var ports;
+  try { ports = JSON.parse(await call('get_sim_ports', _simIp)); }
+  catch(e) { setPage('<div class="p-6 text-err">Error: ' + escHtml(String(e)) + '</div>'); return; }
+
+  _simPorts = ports;
+  renderSimPorts();
+}
+
+function renderSimPorts() {
+  var ports = _simPorts;
+  if (!ports.length) { setPage('<div class="p-6 text-tx-dim">No ports -- add a simulated switch first.</div>'); return; }
+
+  var speedOpts = [4,8,16,32,64].map(function(s) { return '<option value="'+s+'">'+s+'G</option>'; }).join('');
+  var modeOpts  = ['F','E','TE','FL'].map(function(m) { return '<option value="'+m+'">'+m+'</option>'; }).join('');
+  var vsanOpts  = [100,200,300,400].map(function(v) { return '<option value="'+v+'">'+v+'</option>'; }).join('');
+
+  var portCards = ports.map(function(p, i) {
+    var sel = function(id, opts, val) {
+      return '<select id="sp-'+id+'-'+i+'" class="bg-surface-2 border border-border rounded px-2 py-1 text-xs text-tx w-full focus:outline-none focus:border-brand">' +
+        opts.replace('value="'+val+'"', 'value="'+val+'" selected') + '</select>';
+    };
+    var inp = function(id, val, type, min, max, step) {
+      return '<input id="sp-'+id+'-'+i+'" type="'+(type||'number')+'" value="'+val+'"' +
+        (min!==undefined?' min="'+min+'"':'') + (max!==undefined?' max="'+max+'"':'') +
+        (step!==undefined?' step="'+step+'"':'') +
+        ' class="bg-surface-2 border border-border rounded px-2 py-1 text-xs text-tx w-full focus:outline-none focus:border-brand">';
+    };
+    var chk = function(id, checked, label) {
+      return '<label class="flex items-center gap-1.5 cursor-pointer text-xs">' +
+        '<input id="sp-'+id+'-'+i+'" type="checkbox"'+(checked?' checked':'')+' class="accent-brand w-3 h-3">' +
+        label + '</label>';
+    };
+
+    var stateColor = p.state === 'up' ? 'text-ok' : 'text-err';
+    return H.card(
+      '<div class="px-4 py-3 border-b border-border flex items-center justify-between">' +
+        '<span class="font-mono font-semibold">' + escHtml(p.name) + '</span>' +
+        '<span class="text-xs font-semibold '+stateColor+'">' + p.state.toUpperCase() + '</span>' +
+      '</div>' +
+      '<div class="p-3 space-y-2">' +
+        '<div class="grid grid-cols-3 gap-2">' +
+          '<div>' + H.formRow('State', sel('state', '<option value="up">Up</option><option value="down">Down</option>', p.state)) + '</div>' +
+          '<div>' + H.formRow('Mode',  sel('mode',  modeOpts,  p.mode)) + '</div>' +
+          '<div>' + H.formRow('Speed', sel('speed', speedOpts, String(p.speed_gbps))) + '</div>' +
+        '</div>' +
+        '<div class="grid grid-cols-2 gap-2">' +
+          '<div>' + H.formRow('VSAN', sel('vsan', vsanOpts, String(p.vsan_id))) + '</div>' +
+          '<div class="flex items-end gap-3 pb-1">' +
+            chk('sfp',      p.sfp_present, 'SFP Present') +
+            chk('degraded', p.degraded,    'Degraded') +
+          '</div>' +
+        '</div>' +
+        '<div class="border-t border-border pt-2">' +
+          '<div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide mb-1.5">Throughput (Mbps)</div>' +
+          '<div class="grid grid-cols-4 gap-2">' +
+            '<div>' + H.formRow('TX Min', inp('txmin', p.tx_min_mbps, 'number', 0, 100000)) + '</div>' +
+            '<div>' + H.formRow('TX Max', inp('txmax', p.tx_max_mbps, 'number', 0, 100000)) + '</div>' +
+            '<div>' + H.formRow('RX Min', inp('rxmin', p.rx_min_mbps, 'number', 0, 100000)) + '</div>' +
+            '<div>' + H.formRow('RX Max', inp('rxmax', p.rx_max_mbps, 'number', 0, 100000)) + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="border-t border-border pt-2">' +
+          '<div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide mb-1.5">Optical Power (dBm)</div>' +
+          '<div class="grid grid-cols-4 gap-2">' +
+            '<div>' + H.formRow('RX Min', inp('rxpmin', p.rx_pwr_min, 'number', -30, 0, 0.1)) + '</div>' +
+            '<div>' + H.formRow('RX Max', inp('rxpmax', p.rx_pwr_max, 'number', -30, 0, 0.1)) + '</div>' +
+            '<div>' + H.formRow('TX Min', inp('txpmin', p.tx_pwr_min, 'number', -30, 0, 0.1)) + '</div>' +
+            '<div>' + H.formRow('TX Max', inp('txpmax', p.tx_pwr_max, 'number', -30, 0, 0.1)) + '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>',
+      'mb-3'
+    );
+  }).join('');
+
+  setPage(
+    H.page('Simulator Port Config',
+      'Per-port state, throughput and optical power ranges for ' + escHtml(_simIp),
+      H.btn('Save All', 'saveSimPorts()') +
+      H.btnSec('Reset Defaults', 'resetSimPorts()')
+    ) +
+    portCards
+  );
+}
+
+function _collectSimPorts() {
+  return _simPorts.map(function(p, i) {
+    function g(id) {
+      var el = document.getElementById('sp-'+id+'-'+i);
+      return el ? el.value : null;
+    }
+    function gc(id) {
+      var el = document.getElementById('sp-'+id+'-'+i);
+      return el ? el.checked : false;
+    }
+    return {
+      name:        p.name,
+      state:       g('state') || p.state,
+      mode:        g('mode')  || p.mode,
+      speed_gbps:  parseInt(g('speed')) || p.speed_gbps,
+      vsan_id:     parseInt(g('vsan'))  || p.vsan_id,
+      sfp_present: gc('sfp'),
+      degraded:    gc('degraded'),
+      tx_min_mbps: parseFloat(g('txmin')) || 0,
+      tx_max_mbps: parseFloat(g('txmax')) || 0,
+      rx_min_mbps: parseFloat(g('rxmin')) || 0,
+      rx_max_mbps: parseFloat(g('rxmax')) || 0,
+      rx_pwr_min:  parseFloat(g('rxpmin')) || -4.5,
+      rx_pwr_max:  parseFloat(g('rxpmax')) || -2.0,
+      tx_pwr_min:  parseFloat(g('txpmin')) || -2.5,
+      tx_pwr_max:  parseFloat(g('txpmax')) || -0.5,
+    };
+  });
+}
+
+async function saveSimPorts() {
+  var ports = _collectSimPorts();
+  try {
+    var res = JSON.parse(await call('save_sim_ports', _simIp, JSON.stringify(ports)));
+    if (res.ok) { toast('Port config saved -- changes apply on next poll cycle', 'success'); _simPorts = ports; renderSimPorts(); }
+    else toast(res.error, 'error');
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+async function resetSimPorts() {
+  if (!confirm('Reset all port configs to defaults?')) return;
+  try {
+    var res = JSON.parse(await call('reset_sim_ports', _simIp));
+    if (res.ok) { toast('Ports reset to defaults', 'success'); _simPorts = res.ports; renderSimPorts(); }
+    else toast(res.error, 'error');
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+
+async function saveSimulatorSettings() {
+  var settings = {
+    sim_num_ports:   document.getElementById('sim-ports').value,
+    sim_down_pct:    document.getElementById('sim-down-pct').value,
+    sim_min_tx_gbps: document.getElementById('sim-min-tx').value,
+    sim_max_tx_gbps: document.getElementById('sim-max-tx').value,
+    sim_min_rx_gbps: document.getElementById('sim-min-rx').value,
+    sim_max_rx_gbps: document.getElementById('sim-max-rx').value,
+    sim_min_rx_dbm:  document.getElementById('sim-min-dbm').value,
+    sim_max_rx_dbm:  document.getElementById('sim-max-dbm').value,
+    sim_min_temp:    document.getElementById('sim-min-temp').value,
+    sim_max_temp:    document.getElementById('sim-max-temp').value,
+  };
+  try {
+    for (var key in settings) {
+      await call('set_setting', key, String(settings[key]));
+    }
+    toast('Simulator settings saved -- restart to apply changes to the simulator', 'success');
+  } catch(e) {
+    toast('Error: ' + String(e), 'error');
+  }
+}
+
+async function resetSimulatorSettings() {
+  var defaults = {
+    sim_num_ports: '8', sim_down_pct: '10',
+    sim_min_tx_gbps: '0', sim_max_tx_gbps: '16',
+    sim_min_rx_gbps: '0', sim_max_rx_gbps: '16',
+    sim_min_rx_dbm: '-4.5', sim_max_rx_dbm: '-2.0',
+    sim_min_temp: '35', sim_max_temp: '45',
+  };
+  for (var key in defaults) await call('set_setting', key, defaults[key]);
+  toast('Defaults restored', 'success');
+  await simulatorSettings();
+}
+
+
+// -- HELP PAGE ----------------------------------------------------------------
+function helpPage() {
+  function section(icon, title, content) {
+    return H.card(
+      '<div class="px-5 py-4 border-b border-border flex items-center gap-3">' +
+        '<span class="text-2xl">' + icon + '</span>' +
+        '<h2 class="font-semibold text-sm">' + title + '</h2>' +
+      '</div>' +
+      '<div class="px-5 py-4 text-xs text-tx-dim leading-relaxed space-y-2">' + content + '</div>',
+      'mb-4'
+    );
+  }
+  function kv(k, v) {
+    return '<div class="flex gap-2"><span class="font-semibold text-tx w-40 flex-shrink-0">' + k + '</span><span>' + v + '</span></div>';
+  }
+  function ul(items) {
+    return '<ul class="list-disc list-inside space-y-1">' + items.map(function(i){ return '<li>' + i + '</li>'; }).join('') + '</ul>';
+  }
+
+  setPage(
+    H.page('Help & Documentation', 'SAN Management Platform v5.0 -- Cisco MDS 9000') +
+
+    section('[#]', 'Dashboard',
+      '<p>Overview of all registered switches with live statistics: FC aliases, zones, zone sets, and metric row counts.</p>' +
+      '<p>Quick-action buttons link to the most common workflows.</p>'
+    ) +
+
+    section('[@]', 'FC Aliases',
+      '<p>Manage device aliases that map human-readable names to FC WWNs (World Wide Names).</p>' +
+      ul([
+        '<b>Add Alias</b> -- enter a name and a colon-separated WWN (e.g. 21:00:00:24:ff:8a:1b:2c).',
+        '<b>Edit / Delete</b> -- use the buttons on each row.',
+        '<b>Sync from Switch</b> -- pulls the live device-alias database from the switch via NX-API and imports any new entries.',
+        'Aliases marked <b>Synced</b> came from the switch. <b>Local</b> were created manually.',
+      ])
+    ) +
+
+    section('[Z]', 'Zone Editor',
+      '<p>Draft and commit FC zones and zone sets per VSAN.</p>' +
+      ul([
+        'Select a <b>VSAN</b> using the dropdown at the top right -- VSANs are auto-discovered when a switch is added, or via the Sync VSANs button.',
+        '<b>Add Zone</b> -- pick members from the alias dropdown or type a raw WWN.',
+        '<b>Add Zone Set</b> -- click zones in the left panel to move them into the zone set.',
+        '<b>Activate</b> -- marks a zone set as active in the local DB.',
+        '<b>Commit to Switch</b> -- pushes all draft zones and zone sets to the live switch via NX-API. A pre-commit snapshot is created automatically.',
+        '<b>Pull Zones</b> -- imports the live zone configuration from the switch using <code class="font-mono bg-surface-2 px-1 rounded">show zone vsan &lt;id&gt;</code> and <code class="font-mono bg-surface-2 px-1 rounded">show zoneset vsan &lt;id&gt;</code>.',
+      ])
+    ) +
+
+    section('[F]', 'Fabric Discovery',
+      '<p>Displays the FCNS (Fabric Controller Name Server) database for a selected VSAN.</p>' +
+      ul([
+        'Shows each logged-in device: pWWN, FCID, vendor, FC4 type, interface, and symbolic name.',
+        'Select a different VSAN using the dropdown and click Refresh.',
+        '<b>Sync VSANs</b> -- runs <code class="font-mono bg-surface-2 px-1 rounded">show vsan</code> on the switch and refreshes the VSAN dropdown automatically.',
+        'In simulator mode this shows the simulated fabric topology.',
+      ])
+    ) +
+
+    section('[P]', 'Port Inventory',
+      '<p>Lists all FC interfaces with their operational state, mode, speed, VSAN, peer WWN, and alias.</p>' +
+      ul([
+        'Filter by state (Up / Down / Trunking) using the dropdown.',
+        'Search by interface name, peer WWN, or alias name.',
+        'Highlighted in red: ports in DOWN state.',
+        'E/TE ports are inter-switch links (ISLs).',
+      ])
+    ) +
+
+    section('[S]', 'SFP Health',
+      '<p>Transceiver diagnostics for all installed SFPs.</p>' +
+      ul([
+        '<b>RX Power</b>: receive optical power in dBm. Green = OK, yellow = marginal (&gt; -10 dBm warn), red = critical (&gt; -14 dBm).',
+        '<b>TX Power</b>: transmit optical power. Should be between -2.5 and -0.5 dBm for typical SFPs.',
+        '<b>Temperature</b>: SFP die temperature in degrees C. Normal range 30-70 C.',
+        '<b>Voltage</b>: supply voltage, should be 3.3 V +/- 0.1.',
+        '<b>Current</b>: laser bias current in mA.',
+      ])
+    ) +
+
+    section('[~]', 'Performance',
+      '<p>Port throughput charts and optical power history.</p>' +
+      ul([
+        '<b>Top Ports by Throughput</b>: bar chart of average TX/RX Mbps across all ports.',
+        '<b>Port History</b>: select a port and time window (1h / 6h / 24h), then click Load.',
+        '<b>Optical Power Trend</b>: RX (solid purple) and TX (dashed cyan) power over time. Useful for detecting fibre degradation.',
+        'Data is collected by the background poller every 60 seconds (configurable in Settings).',
+      ])
+    ) +
+
+    section('[*]', 'Snapshots',
+      '<p>Versioned backups of the zoning configuration.</p>' +
+      ul([
+        'Snapshots are created automatically before every <b>Commit to Switch</b> operation.',
+        'Click <b>Take Snapshot</b> to create a manual checkpoint.',
+        '<b>View</b> shows the raw JSON payload.',
+        '<b>Restore</b> re-creates the snapshot\'s zones as draft zones in the local DB (does not push to switch).',
+      ])
+    ) +
+
+    section('[U]', 'Users',
+      '<p>Platform user accounts and role-based access control.</p>' +
+      ul([
+        '<b>ADMIN</b> -- full access to all pages and operations.',
+        '<b>OPERATOR</b> -- can view and edit zones/aliases, cannot manage users or settings.',
+        '<b>VIEWER</b> -- read-only access to all data pages.',
+        'Default credentials: <code class="font-mono bg-surface-2 px-1 rounded">admin / Admin1234!</code>',
+        'Change the admin password immediately after first login.',
+      ])
+    ) +
+
+    section('[=]', 'Settings',
+      '<p>Platform configuration, switch management, and database tools.</p>' +
+      ul([
+        '<b>Add Switch</b> -- enter the NX-API IP, port (default 8443), credentials, and click Test Connection before saving. VSANs are discovered automatically.',
+        '<b>MDS 9000 Simulator</b> -- toggle to use the built-in simulator instead of a real switch. Safe for testing and demos.',
+        '<b>Poll Interval</b> -- how often the background thread collects metrics (default 60 s).',
+        '<b>Database Statistics</b> -- live counts of all stored objects.',
+        '<b>Download Backup</b> -- opens a Save dialog and exports all data as JSON.',
+        '<b>Restore from Backup</b> -- merges a JSON backup; existing records are preserved.',
+        '<b>Purge old metrics</b> -- deletes all port metric rows to reclaim disk space.',
+      ])
+    ) +
+
+    section('[~]', 'Simulator Settings',
+      '<p>Per-port configuration for the built-in MDS 9000 simulator.</p>' +
+      ul([
+        'Each FC port can be independently set to Up or Down.',
+        'Configure mode (F/E/TE/FL), speed (4G-64G), VSAN, and SFP presence.',
+        'Set <b>throughput ranges</b> (TX/RX min/max Mbps) to control simulated traffic levels.',
+        'Set <b>optical power ranges</b> (RX/TX min/max dBm) to simulate healthy or degraded transceivers.',
+        'Mark a port as <b>Degraded</b> to simulate a failing SFP (low RX power).',
+        'Click <b>Save All</b> -- changes apply on the next poll cycle (within 60 s).',
+        'Click <b>Reset Defaults</b> -- restores the 8-port default configuration.',
+      ])
+    ) +
+
+    section('[?]', 'Keyboard Shortcuts & Tips',
+      ul([
+        'Press <b>Enter</b> in the password field to log in.',
+        'All tables support <b>live search</b> -- type to filter instantly.',
+        'The <b>breadcrumb</b> at the top shows the current page and active switch.',
+        'The <b>SIMULATOR</b> badge appears in the top bar when simulator mode is active.',
+        'Run <code class="font-mono bg-surface-2 px-1 rounded">python main.py --reset-db</code> to wipe the database and start fresh.',
+        'Database is stored at <code class="font-mono bg-surface-2 px-1 rounded">~/.san-platform/san_platform.db</code> (SQLite).',
+      ]) +
+      '<div class="mt-3 pt-3 border-t border-border">' +
+        '<p class="font-semibold text-tx mb-1">Support & Source</p>' +
+        '<p>Source code and issue tracker: <a href="https://github.com/labrouss/san-platform" class="text-brand underline">github.com/labrouss/san-platform</a></p>' +
+      '</div>'
+    )
+  );
+}
+
+
+</script>
+</body>
+</html>
