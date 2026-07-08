@@ -67,8 +67,8 @@ workers/poller.py    Background polling thread (metrics collection)
 ### From source
 
 ```bash
-git clone https://github.com/labrouss/san-platform.git
-cd san-platform/san-web
+git clone https://github.com/labrouss/SAN_Platform_Manager.git
+cd SAN_Platform_Manager
 
 # Install dependencies
 pip install PyQt5 PyQtWebEngine requests
@@ -183,7 +183,7 @@ Output is placed in `dist/san-platform` (Linux/macOS) or `dist/san-platform.exe`
 
 ## GitHub Actions — Automated Builds
 
-The included workflow (`.github/workflows/build.yml`) builds release executables for all three platforms whenever a version tag is pushed:
+The included workflow (`.github/workflows/build.yml`) builds release executables for all three platforms whenever a version tag is pushed. It auto-detects whether `main.py` lives at the repository root or inside a subfolder (e.g. `san-web/`), so it works regardless of how the repo is laid out:
 
 ```bash
 git tag v1.0.0

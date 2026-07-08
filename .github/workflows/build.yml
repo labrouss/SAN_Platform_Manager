@@ -36,18 +36,43 @@ jobs:
             asset_name: san-platform-macos
 
     steps:
-      # ── Checkout ────────────────────────────────────────────────────────────
+      # -- Checkout --------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── Python ──────────────────────────────────────────────────────────────
+      # -- Locate the project directory -------------------------------------------
+      # Works whether main.py sits at the repo root or inside a subfolder
+      # (e.g. san-web/), regardless of how the repo was structured on GitHub.
+      - name: Locate project directory
+        id: locate
+        shell: bash
+        run: |
+          if [ -f "main.py" ] && [ -f "build.py" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+            echo "Found project at repo root"
+          elif [ -f "san-web/main.py" ]; then
+            echo "dir=san-web" >> "$GITHUB_OUTPUT"
+            echo "Found project at san-web/"
+          else
+            FOUND=$(find . -maxdepth 3 -name "main.py" -not -path "*/node_modules/*" | head -1)
+            if [ -z "$FOUND" ]; then
+              echo "ERROR: could not locate main.py anywhere in the repository"
+              find . -maxdepth 2 -type d
+              exit 1
+            fi
+            DIR=$(dirname "$FOUND")
+            echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+            echo "Found project at $DIR (auto-detected)"
+          fi
+
+      # -- Python ------------------------------------------------------------------
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      # ── Linux system dependencies ────────────────────────────────────────────
+      # -- Linux system dependencies -------------------------------------------------
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -60,30 +85,30 @@ jobs:
             libegl1 libopengl0 \
             xvfb
 
-      # ── macOS system dependencies ────────────────────────────────────────────
+      # -- macOS system dependencies --------------------------------------------------
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: |
           brew install --quiet qt@5 || true
 
-      # ── Python dependencies ──────────────────────────────────────────────────
+      # -- Python dependencies -----------------------------------------------------
       - name: Install Python dependencies
-        working-directory: san-web
+        working-directory: ${{ steps.locate.outputs.dir }}
         run: |
           python -m pip install --upgrade pip
           pip install PyQt5==5.15.10 PyQtWebEngine==5.15.6 requests pyinstaller
 
-      # ── Verify imports ───────────────────────────────────────────────────────
+      # -- Verify imports -----------------------------------------------------------
       - name: Verify Qt imports
-        working-directory: san-web
+        working-directory: ${{ steps.locate.outputs.dir }}
         run: |
           python -c "from PyQt5.QtWebEngineWidgets import QWebEngineView; print('QWebEngineView OK')"
           python -c "from PyQt5.QtWebChannel import QWebChannel; print('QWebChannel OK')"
 
-      # ── Build ────────────────────────────────────────────────────────────────
+      # -- Build --------------------------------------------------------------------
       - name: Build executable (Linux with Xvfb)
         if: runner.os == 'Linux'
-        working-directory: san-web
+        working-directory: ${{ steps.locate.outputs.dir }}
         run: |
           xvfb-run -a python build.py --clean
         env:
@@ -91,38 +116,40 @@ jobs:
 
       - name: Build executable (Windows / macOS)
         if: runner.os != 'Linux'
-        working-directory: san-web
+        working-directory: ${{ steps.locate.outputs.dir }}
         run: |
           python build.py --clean
 
-      # ── Verify output ────────────────────────────────────────────────────────
+      # -- Verify output --------------------------------------------------------------
       - name: Check dist output (Unix)
         if: runner.os != 'Windows'
         run: |
-          ls -lh san-web/dist/
-          test -f san-web/dist/${{ matrix.artifact }}
+          ls -lh "${{ steps.locate.outputs.dir }}/dist/"
+          test -f "${{ steps.locate.outputs.dir }}/dist/${{ matrix.artifact }}"
 
       - name: Check dist output (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Get-ChildItem san-web\dist\
-          if (-not (Test-Path "san-web\dist\${{ matrix.artifact }}")) { exit 1 }
+          $distPath = Join-Path "${{ steps.locate.outputs.dir }}" "dist"
+          Get-ChildItem $distPath
+          $exePath = Join-Path $distPath "${{ matrix.artifact }}"
+          if (-not (Test-Path $exePath)) { exit 1 }
 
-      # ── Upload artifact for inspection ───────────────────────────────────────
+      # -- Upload artifact for inspection -----------------------------------------
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: san-web/dist/${{ matrix.artifact }}
+          path: ${{ steps.locate.outputs.dir }}/dist/${{ matrix.artifact }}
           retention-days: 7
 
-      # ── Publish to GitHub Release (only on tag push) ─────────────────────────
+      # -- Publish to GitHub Release (only on tag push) -----------------------------
       - name: Rename artifact for release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          cp san-web/dist/${{ matrix.artifact }} ${{ matrix.asset_name }}
+          cp "${{ steps.locate.outputs.dir }}/dist/${{ matrix.artifact }}" "${{ matrix.asset_name }}"
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
