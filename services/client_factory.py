@@ -117,13 +117,21 @@ def _parse_zone_member(m: dict) -> dict | None:
     Classify a single ROW_zone_member entry per the real NX-API schema.
     The 'type' field is authoritative: pwwn, interface, fcid, ip-address,
     device-alias, fwwn, symbolic-nodename, domain-id, fcalias.
-    A pwwn-type member may carry a 'dev_alias' annotation (the resolved
-    device-alias name) -- this is metadata about the pwwn, not a separate
-    member type.
+
+    A pwwn-type member frequently carries a 'dev_alias' annotation -- the
+    device-alias name the switch has resolved for that pwwn. When present,
+    this is the canonical, human-managed identity for the member (it's
+    what the operator actually configured and manages), so we store the
+    member as a device_alias using that name rather than the raw wwn.
+    The wwn is still the underlying identity on the wire, but the alias
+    is what should surface in the UI and in any WWN/alias round-trip.
     """
     mtype = (m.get("type") or "").strip().lower()
 
     if mtype == "pwwn" and m.get("wwn"):
+        dev_alias = (m.get("dev_alias") or "").strip()
+        if dev_alias:
+            return {"type": "device_alias", "value": dev_alias}
         return {"type": "pwwn", "value": m["wwn"].strip().lower()}
     if mtype == "device-alias" and m.get("dev_alias"):
         # Rare: some outputs list a device-alias member directly as its own type
@@ -142,10 +150,10 @@ def _parse_zone_member(m: dict) -> dict | None:
         return {"type": "symbolic-nodename", "value": m["symnodename"].strip()}
 
     # Fallback: no recognized type field, guess from whichever key is present
-    if m.get("wwn"):
-        return {"type": "pwwn", "value": m["wwn"].strip().lower()}
     if m.get("dev_alias"):
         return {"type": "device_alias", "value": m["dev_alias"].strip()}
+    if m.get("wwn"):
+        return {"type": "pwwn", "value": m["wwn"].strip().lower()}
     if m.get("fcid"):
         return {"type": "fcid", "value": m["fcid"].strip()}
     return None
@@ -169,13 +177,19 @@ def parse_zones(body: dict, vsan_id: int) -> list[dict]:
         if not name:
             continue  # skip unnamed/placeholder rows -- nothing to persist
         members = []
+        seen = set()
         member_block = z_row.get("TABLE_zone_member") or {}
         if not isinstance(member_block, dict):
             member_block = {}
         for m in _to_array(member_block.get("ROW_zone_member")):
             parsed = _parse_zone_member(m)
-            if parsed and parsed["value"]:
-                members.append(parsed)
+            if not parsed or not parsed["value"]:
+                continue
+            key = (parsed["type"], parsed["value"].lower())
+            if key in seen:
+                continue  # skip duplicate member rows (some switches return these)
+            seen.add(key)
+            members.append(parsed)
         zones.append({
             "name":    name,
             "vsan_id": vsan_id,
