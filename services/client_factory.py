@@ -112,26 +112,74 @@ def parse_vsans(body: dict) -> list[dict]:
 
 
 # -- Zone: parse "show zone vsan X" -------------------------------------------
+def _parse_zone_member(m: dict) -> dict | None:
+    """
+    Classify a single ROW_zone_member entry per the real NX-API schema.
+    The 'type' field is authoritative: pwwn, interface, fcid, ip-address,
+    device-alias, fwwn, symbolic-nodename, domain-id, fcalias.
+    A pwwn-type member may carry a 'dev_alias' annotation (the resolved
+    device-alias name) -- this is metadata about the pwwn, not a separate
+    member type.
+    """
+    mtype = (m.get("type") or "").strip().lower()
+
+    if mtype == "pwwn" and m.get("wwn"):
+        return {"type": "pwwn", "value": m["wwn"].strip().lower()}
+    if mtype == "device-alias" and m.get("dev_alias"):
+        # Rare: some outputs list a device-alias member directly as its own type
+        return {"type": "device_alias", "value": m["dev_alias"].strip()}
+    if mtype == "interface" and m.get("intf_fc"):
+        return {"type": "interface", "value": m["intf_fc"].strip()}
+    if mtype == "interface" and m.get("intf_port_ch") is not None:
+        return {"type": "interface", "value": f"port-channel{m['intf_port_ch']}"}
+    if mtype == "fcid" and m.get("fcid"):
+        return {"type": "fcid", "value": m["fcid"].strip()}
+    if mtype == "ip-address" and m.get("ipaddr"):
+        return {"type": "ip-address", "value": m["ipaddr"].strip()}
+    if mtype == "fwwn" and m.get("wwn"):
+        return {"type": "fwwn", "value": m["wwn"].strip().lower()}
+    if mtype == "symbolic-nodename" and m.get("symnodename"):
+        return {"type": "symbolic-nodename", "value": m["symnodename"].strip()}
+
+    # Fallback: no recognized type field, guess from whichever key is present
+    if m.get("wwn"):
+        return {"type": "pwwn", "value": m["wwn"].strip().lower()}
+    if m.get("dev_alias"):
+        return {"type": "device_alias", "value": m["dev_alias"].strip()}
+    if m.get("fcid"):
+        return {"type": "fcid", "value": m["fcid"].strip()}
+    return None
+
+
 def parse_zones(body: dict, vsan_id: int) -> list[dict]:
     """
     NX-API: show zone vsan <id>
-    Returns TABLE_zone -> ROW_zone with zone_name and TABLE_zone_member.
+    Returns TABLE_zone -> ROW_zone, each with 'name', 'vsan', and an
+    optional TABLE_zone_member -> ROW_zone_member (dict or list).
+
+    Some switches return TABLE_zone as null (not an empty dict) when a
+    VSAN has no zones configured at all -- guard against that, and skip
+    any row that has no usable name (seen on some real switches as a
+    rowless default-zone-policy artifact).
     """
     zones = []
-    for z_row in _to_array(body.get("TABLE_zone", {}).get("ROW_zone")):
+    table_zone = body.get("TABLE_zone") or {}
+    for z_row in _to_array(table_zone.get("ROW_zone") if isinstance(table_zone, dict) else None):
+        name = (z_row.get("name") or "").strip()
+        if not name:
+            continue  # skip unnamed/placeholder rows -- nothing to persist
         members = []
-        for m in _to_array((z_row.get("TABLE_zone_member") or {}).get("ROW_zone_member")):
-            # Keys vary: device_alias, wwn, fcid, symbolic_nodename
-            if m.get("device_alias"):
-                members.append({"type": "device_alias", "value": m["device_alias"].strip()})
-            elif m.get("wwn"):
-                members.append({"type": "pwwn", "value": m["wwn"].strip().lower()})
-            elif m.get("fcid"):
-                members.append({"type": "fcid", "value": m["fcid"].strip()})
+        member_block = z_row.get("TABLE_zone_member") or {}
+        if not isinstance(member_block, dict):
+            member_block = {}
+        for m in _to_array(member_block.get("ROW_zone_member")):
+            parsed = _parse_zone_member(m)
+            if parsed and parsed["value"]:
+                members.append(parsed)
         zones.append({
-            "name":    (z_row.get("zone_name") or "").strip(),
+            "name":    name,
             "vsan_id": vsan_id,
-            "members": [m for m in members if m["value"]],
+            "members": members,
         })
     return zones
 
@@ -139,33 +187,49 @@ def parse_zones(body: dict, vsan_id: int) -> list[dict]:
 def parse_zone_sets(body: dict) -> list[dict]:
     """
     NX-API: show zoneset [vsan X]
-    Returns TABLE_zoneset -> ROW_zoneset.
+    Returns TABLE_zoneset -> ROW_zoneset, each with 'name', 'vsan',
+    'active' (bool-ish), and nested TABLE_zone -> ROW_zone (each with its
+    own 'name' and TABLE_zone_member).
+
+    Guards against TABLE_zoneset being null (some switches return this
+    rather than an empty dict when no zone sets exist) and skips any row
+    with no usable name.
     """
-    rows = _to_array(body.get("TABLE_zoneset", {}).get("ROW_zoneset"))
+    table_zoneset = body.get("TABLE_zoneset") or {}
+    rows = _to_array(table_zoneset.get("ROW_zoneset") if isinstance(table_zoneset, dict) else None)
     result = []
     for zs_row in rows:
+        zs_name = (zs_row.get("name") or "").strip()
+        if not zs_name:
+            continue  # skip unnamed/placeholder rows
+
         zones = []
-        for z_row in _to_array(zs_row.get("TABLE_zone", {}).get("ROW_zone")):
+        table_zone = zs_row.get("TABLE_zone") or {}
+        if not isinstance(table_zone, dict):
+            table_zone = {}
+        for z_row in _to_array(table_zone.get("ROW_zone")):
+            zname = (z_row.get("name") or "").strip()
+            if not zname:
+                continue
             members = []
-            for m in _to_array((z_row.get("TABLE_zone_member") or {}).get("ROW_zone_member")):
-                if m.get("device_alias"):
-                    members.append({"type": "device_alias", "value": m["device_alias"].strip()})
-                elif m.get("wwn"):
-                    members.append({"type": "pwwn", "value": m["wwn"].strip().lower()})
-                elif m.get("fcid"):
-                    members.append({"type": "fcid", "value": m["fcid"].strip()})
-            zones.append({
-                "name":    (z_row.get("zone_name") or "").strip(),
-                "members": [m for m in members if m["value"]],
-            })
+            member_block = z_row.get("TABLE_zone_member") or {}
+            if not isinstance(member_block, dict):
+                member_block = {}
+            for m in _to_array(member_block.get("ROW_zone_member")):
+                parsed = _parse_zone_member(m)
+                if parsed and parsed["value"]:
+                    members.append(parsed)
+            zones.append({"name": zname, "members": members})
+
         try:
-            vid = int(zs_row.get("zoneset_vsan", 0))
+            vid = int(zs_row.get("vsan", 0))
         except (ValueError, TypeError):
             vid = 0
+        active_raw = zs_row.get("active", zs_row.get("zoneset_active", ""))
         result.append({
-            "name":      (zs_row.get("zoneset_name") or "").strip(),
+            "name":      zs_name,
             "vsan_id":   vid,
-            "is_active": str(zs_row.get("zoneset_active", "")).lower() == "true",
+            "is_active": str(active_raw).strip().lower() in ("true", "1", "yes"),
             "zones":     zones,
         })
     return result
@@ -214,66 +278,145 @@ def parse_interface_brief(body: dict) -> list[dict]:
 def parse_transceiver(body: dict) -> list[dict]:
     """
     NX-API: show interface transceiver
-    TABLE_interface_transceiver -> ROW_interface_transceiver.
-    Calibration data is in TABLE_calibration -> ROW_calibration.
+    Real schema (verified against live switch output):
+
+        TABLE_interface_trans -> ROW_interface_trans (list or single dict)
+          interface_sfp: "fc1/2"
+          TABLE_calib -> ROW_calib: A LIST of exactly two dicts (when SFP present):
+            [0] static identity info: cisco_part_number, cisco_product_id,
+                name (vendor), partnum, serialnum, sfp ("sfp is present"),
+                supported_speeds, tx_length, tx_medium, txcvr_type, rev, ciscoid
+            [1] live readings: optical_rx_pwr, optical_tx_pwr, temperature,
+                volt, current, tx_fault_type
+          When no SFP is installed, ROW_calib is typically absent or the
+          single dict just has {"sfp": "sfp is not present"}.
     """
     rows = _to_array(
-        body.get("TABLE_interface_transceiver", {}).get("ROW_interface_transceiver")
+        body.get("TABLE_interface_trans", {}).get("ROW_interface_trans")
     )
     result = []
     for r in rows:
-        iface = (r.get("interface") or "").strip()
+        iface = (r.get("interface_sfp") or r.get("interface") or "").strip()
         if not iface.lower().startswith("fc"):
             continue
-        if (r.get("sfp") or "").strip().lower() == "absent":
-            continue
 
-        # Calibration block
+        calib_rows = _to_array(
+            (r.get("TABLE_calib") or {}).get("ROW_calib")
+        )
+
+        # Merge the (up to) two calib dicts into one lookup -- static
+        # identity info and live readings never share keys, so a simple
+        # merge is safe and lets every field be looked up the same way.
         cal = {}
-        cal_raw = r.get("TABLE_calibration", {})
-        if cal_raw:
-            cal = (cal_raw.get("ROW_calibration") or {})
-            if isinstance(cal, list):
-                cal = cal[0] if cal else {}
+        for c in calib_rows:
+            if isinstance(c, dict):
+                cal.update(c)
 
-        def _f(k):
-            v = cal.get(k)
+        sfp_status = (cal.get("sfp") or "").strip().lower()
+        if not cal or "not present" in sfp_status or "absent" in sfp_status:
+            continue  # no SFP installed in this port
+
+        def _f(key):
+            v = cal.get(key)
+            if v is None:
+                return None
+            s = str(v).strip()
+            if s in ("", "--", "N/A", "n/a"):
+                return None
             try:
-                return float(v) if v and str(v).strip() not in ("--", "N/A", "") else None
+                return float(s)
             except (ValueError, TypeError):
                 return None
 
         result.append({
-            "interface":    iface,
-            "sfp_present":  True,
-            "part_number":  (r.get("partnum") or r.get("part_number") or "").strip(),
-            "serial_number":(r.get("serialnum") or r.get("serial_number") or "").strip(),
-            "vendor":       (r.get("name") or r.get("vendor") or "").strip(),
-            "rx_power_dbm": _f("rx_pwr"),
-            "tx_power_dbm": _f("tx_pwr"),
-            "temperature":  _f("temperature"),
-            "voltage":      _f("voltage"),
-            "current_ma":   _f("current"),
+            "interface":     iface,
+            "sfp_present":   True,
+            "part_number":   (cal.get("partnum") or "").strip(),
+            "cisco_pid":     (cal.get("cisco_product_id") or "").strip(),
+            "serial_number": (cal.get("serialnum") or "").strip(),
+            "vendor":        (cal.get("name") or "").strip(),
+            "revision":      (cal.get("rev") or "").strip(),
+            "transceiver_type": (cal.get("txcvr_type") or "").strip(),
+            "supported_speeds": (cal.get("supported_speeds") or "").strip(),
+            "rx_power_dbm":  _f("optical_rx_pwr"),
+            "tx_power_dbm":  _f("optical_tx_pwr"),
+            "temperature":   _f("temperature"),
+            "voltage":       _f("volt"),
+            "current_ma":    _f("current"),
         })
     return result
 
 
 def parse_counters(body: dict) -> list[dict]:
-    rows = _to_array(
-        body.get("TABLE_interface_brief_if", {}).get("ROW_interface_brief_if") or
-        body.get("TABLE_interface", {}).get("ROW_interface")
-    )
+    """
+    NX-API: show interface counters
+
+    Real schema (verified against live switch output) -- NOTE this is
+    structurally different from most other NX-API tables: TABLE_counters
+    is itself a top-level LIST, not a dict wrapping ROW_counters:
+
+        {
+          "TABLE_counters": [
+            { "ROW_counters": [ {interface, rx_bytes, tx_bytes,
+                                  rx_rate_bits_ps, tx_rate_bits_ps,
+                                  rx_crc_fcs, rx_link_faliures, ...}, ... ] }
+          ]
+        }
+
+    The switch computes its own live rate in rx_rate_bits_ps /
+    tx_rate_bits_ps -- we use that directly rather than manually
+    differencing byte counters between polls, which is both less
+    accurate (depends on our own poll interval, not the switch's
+    internal sampling window) and unnecessary since the switch already
+    does this calculation in hardware.
+
+    Note: Cisco's real field name really is "rx_link_faliures" (their
+    typo, not ours) -- kept as-is since that's what the switch returns.
+    """
+    table_counters = body.get("TABLE_counters")
+    if not table_counters:
+        return []
+    # TABLE_counters is a list; each entry has its own ROW_counters
+    # (dict or list) -- flatten all of them together.
+    all_rows = []
+    for block in _to_array(table_counters):
+        if not isinstance(block, dict):
+            continue
+        all_rows.extend(_to_array(block.get("ROW_counters")))
+
     result = []
-    for r in rows:
-        iface = r.get("interface", "")
+    for r in all_rows:
+        iface = (r.get("interface") or "").strip()
         if not iface.lower().startswith("fc"):
             continue
+
+        def _int(key, default=0):
+            v = r.get(key, default)
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                return default
+
+        def _rate_bps(key):
+            v = r.get(key)
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return None
+
         result.append({
-            "interface":    iface,
-            "rx_bytes":     int(r.get("rx_bytes", "0") or "0"),
-            "tx_bytes":     int(r.get("tx_bytes", "0") or "0"),
-            "rx_crc_err":   int(r.get("rx_crc_err", "0") or "0"),
-            "link_failures": int(r.get("link_failures", "0") or "0"),
+            "interface":      iface,
+            "rx_bytes":       _int("rx_bytes"),
+            "tx_bytes":       _int("tx_bytes"),
+            "rx_frames":      _int("rx_frames"),
+            "tx_frames":      _int("tx_frames"),
+            "rx_crc_err":     _int("rx_crc_fcs"),
+            "link_failures":  _int("rx_link_faliures"),
+            "rx_discards":    _int("rx_discard_frames"),
+            "tx_discards":    _int("tx_discard_frames"),
+            "rx_rate_bps":    _rate_bps("rx_rate_bits_ps"),
+            "tx_rate_bps":    _rate_bps("tx_rate_bits_ps"),
+            "txwait_percent_1s": _rate_bps("txwait_percent_1s"),
         })
     return result
 

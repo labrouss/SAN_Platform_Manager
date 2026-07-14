@@ -1,0 +1,72 @@
+! Example startup-config for the SAN Platform MDS simulator
+! Mount this file and set SAN_SIM_STARTUP_CONFIG to its in-container path.
+! Lines starting with "!" are comments and are ignored, same as real NX-OS.
+
+vsan database
+  vsan 100 name "Fabric-A"
+  vsan 200 name "Fabric-B"
+!
+interface fc1/1
+  switchport mode F
+  switchport speed 8000
+  no shutdown
+!
+interface fc1/2
+  switchport mode F
+  switchport speed 8000
+  no shutdown
+!
+interface fc1/3
+  switchport mode F
+  switchport speed 8000
+  no shutdown
+!
+interface fc1/4
+  switchport mode F
+  switchport speed 8000
+  shutdown
+!
+interface fc1/5
+  switchport mode E
+  switchport speed 16000
+  no shutdown
+!
+interface fc1/6
+  switchport mode F
+  switchport speed 8000
+  no shutdown
+!
+interface fc1/7
+  switchport mode F
+  switchport speed 8000
+  no shutdown
+!
+interface fc1/8
+  switchport mode F
+  switchport speed 4000
+  no shutdown
+!
+device-alias database
+  device-alias name DB_Server_01_HBA_A pwwn 21:00:00:24:ff:8a:1b:01
+  device-alias name DB_Server_01_HBA_B pwwn 21:00:00:24:ff:8a:1b:02
+  device-alias name App_Server_02_HBA_A pwwn 21:00:00:24:ff:8a:1b:03
+  device-alias name Storage_Array_A_P1 pwwn 50:00:d3:10:59:be:8a:04
+  device-alias name Storage_Array_A_P2 pwwn 50:00:d3:10:59:be:8a:05
+  device-alias name Backup_Host_HBA_A pwwn 20:00:00:25:59:be:8a:06
+device-alias commit
+!
+zone name Zone_DB_to_Storage vsan 100
+  member device-alias DB_Server_01_HBA_A
+  member device-alias Storage_Array_A_P1
+  member device-alias Storage_Array_A_P2
+!
+zone name Zone_App_to_Storage vsan 100
+  member device-alias App_Server_02_HBA_A
+  member device-alias Storage_Array_A_P1
+!
+zoneset name Production_ZoneSet vsan 100
+  member Zone_DB_to_Storage
+  member Zone_App_to_Storage
+!
+zoneset activate name Production_ZoneSet vsan 100
+!

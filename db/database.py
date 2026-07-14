@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS zones (
     description TEXT,
     is_draft    INTEGER NOT NULL DEFAULT 1,
     synced_at   TEXT,
+    last_synced_name TEXT,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     UNIQUE(switch_id, name, vsan_id)
@@ -145,6 +146,7 @@ CREATE TABLE IF NOT EXISTS zone_sets (
     is_draft     INTEGER NOT NULL DEFAULT 1,
     activated_at TEXT,
     synced_at    TEXT,
+    last_synced_name TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     UNIQUE(switch_id, name, vsan_id)
@@ -195,6 +197,20 @@ def init_db() -> None:
     import hashlib
     with get_db() as conn:
         conn.executescript(SCHEMA_SQL)
+
+        # Lightweight migration: add last_synced_name to existing DBs that
+        # predate this column (used to detect renames needing switch cleanup).
+        for table in ("zones", "zone_sets"):
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if "last_synced_name" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN last_synced_name TEXT")
+
+        # Clean up any blank-name zones/zone-sets left over from a prior
+        # bug where a malformed switch response (TABLE_zone returned as
+        # null/empty rather than an empty dict) produced unnamed rows.
+        conn.execute("DELETE FROM zones WHERE TRIM(COALESCE(name, '')) = ''")
+        conn.execute("DELETE FROM zone_sets WHERE TRIM(COALESCE(name, '')) = ''")
+
         # Always ensure admin user exists with correct credentials.
         # Using INSERT OR IGNORE then UPDATE so existing data is preserved
         # but admin password is always reset to default on fresh installs.
@@ -455,8 +471,29 @@ def create_zone(switch_id: str, name: str, vsan_id: int,
         row = conn.execute("SELECT * FROM zones WHERE id=?", (zid,)).fetchone()
         return row_to_dict(row)
 
+def get_zone_by_id(zone_id: str) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT z.*, GROUP_CONCAT(zm.value,'|') AS member_values, "
+            " GROUP_CONCAT(zm.member_type,'|') AS member_types "
+            " FROM zones z LEFT JOIN zone_members zm ON zm.zone_id=z.id "
+            " WHERE z.id=? GROUP BY z.id",
+            (zone_id,)
+        ).fetchone()
+        if not row:
+            return None
+        d = row_to_dict(row)
+        vals = d.pop("member_values", "") or ""
+        types = d.pop("member_types", "") or ""
+        members = []
+        if vals:
+            for v, t in zip(vals.split("|"), types.split("|")):
+                members.append({"value": v, "member_type": t})
+        d["members"] = members
+        return d
+
 def update_zone(zone_id: str, **kwargs) -> dict | None:
-    allowed = {"name", "description", "is_draft", "synced_at"}
+    allowed = {"name", "description", "is_draft", "synced_at", "last_synced_name"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return None
@@ -523,6 +560,20 @@ def create_zone_set(switch_id: str, name: str, vsan_id: int) -> dict:
         )
         row = conn.execute("SELECT * FROM zone_sets WHERE id=?", (zsid,)).fetchone()
         return row_to_dict(row)
+
+def get_zone_set_by_id(zs_id: str) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM zone_sets WHERE id=?", (zs_id,)).fetchone()
+        if not row:
+            return None
+        d = row_to_dict(row)
+        members = conn.execute(
+            "SELECT z.id, z.name FROM zone_set_members zsm "
+            "JOIN zones z ON z.id=zsm.zone_id WHERE zsm.zone_set_id=?",
+            (zs_id,)
+        ).fetchall()
+        d["zone_members"] = [row_to_dict(m) for m in members]
+        return d
 
 def delete_zone_set(zs_id: str) -> bool:
     with get_db() as conn:

@@ -80,28 +80,72 @@ def _default_aliases(ip: str) -> list:
 # In-memory state per IP
 _states: dict = {}
 
+# Loaded once per process from SAN_SIM_STARTUP_CONFIG, if set -- avoids
+# re-parsing the file for every switch IP the simulator is asked about.
+_startup_config_cache: dict | None = None
+_startup_config_loaded = False
+
+
+def _load_startup_config_once() -> dict | None:
+    global _startup_config_cache, _startup_config_loaded
+    if _startup_config_loaded:
+        return _startup_config_cache
+    _startup_config_loaded = True
+    try:
+        from services.startup_config import get_configured_path, load_startup_config
+        path = get_configured_path()
+        if path:
+            _startup_config_cache = load_startup_config(path)
+            print(f"[SIM] Loaded startup-config from {path}: "
+                  f"{len(_startup_config_cache['ports'])} ports, "
+                  f"{len(_startup_config_cache['aliases'])} aliases, "
+                  f"{len(_startup_config_cache['zones'])} zones, "
+                  f"{len(_startup_config_cache['zone_sets'])} zone sets")
+    except Exception as e:
+        print(f"[SIM] Failed to load startup-config: {e}")
+        _startup_config_cache = None
+    return _startup_config_cache
+
 
 def _get_state(ip: str) -> dict:
     if ip not in _states:
-        _states[ip] = {
-            "poll_count": 0,
-            "aliases": _default_aliases(ip),
-            "zones": [
-                {"name": "Zone_DB_to_Storage",   "vsan_id": 100,
-                 "members": [{"type": "pwwn", "value": _make_wwn("21:00:00:24", ip, 0x01)},
-                              {"type": "device_alias", "value": "Storage_Array_A_P1"},
-                              {"type": "device_alias", "value": "Storage_Array_A_P2"}]},
-                {"name": "Zone_App_to_Storage",  "vsan_id": 100,
-                 "members": [{"type": "pwwn", "value": _make_wwn("21:00:00:24", ip, 0x03)},
-                              {"type": "device_alias", "value": "Storage_Array_A_P1"}]},
-            ],
-            "zone_sets": [
-                {"name": "Production_ZoneSet", "vsan_id": 100, "is_active": True,
-                 "zones": ["Zone_DB_to_Storage", "Zone_App_to_Storage"]},
-            ],
-            "ports": default_ports(ip),
-        }
+        cfg = _load_startup_config_once()
+        if cfg and cfg["ports"]:
+            # Seed this simulated switch from the startup-config file.
+            # Every simulated IP gets an independent copy of the same
+            # topology (a fresh deep-ish copy so mutating one switch's
+            # state doesn't leak into another's).
+            import copy
+            _states[ip] = {
+                "poll_count": 0,
+                "aliases": copy.deepcopy(cfg["aliases"]),
+                "zones": copy.deepcopy(cfg["zones"]),
+                "zone_sets": copy.deepcopy(cfg["zone_sets"]),
+                "ports": copy.deepcopy(cfg["ports"]),
+                "vsans": dict(cfg.get("vsans", {})),
+            }
+        else:
+            _states[ip] = {
+                "poll_count": 0,
+                "aliases": _default_aliases(ip),
+                "zones": [
+                    {"name": "Zone_DB_to_Storage",   "vsan_id": 100,
+                     "members": [{"type": "pwwn", "value": _make_wwn("21:00:00:24", ip, 0x01)},
+                                  {"type": "device_alias", "value": "Storage_Array_A_P1"},
+                                  {"type": "device_alias", "value": "Storage_Array_A_P2"}]},
+                    {"name": "Zone_App_to_Storage",  "vsan_id": 100,
+                     "members": [{"type": "pwwn", "value": _make_wwn("21:00:00:24", ip, 0x03)},
+                                  {"type": "device_alias", "value": "Storage_Array_A_P1"}]},
+                ],
+                "zone_sets": [
+                    {"name": "Production_ZoneSet", "vsan_id": 100, "is_active": True,
+                     "zones": ["Zone_DB_to_Storage", "Zone_App_to_Storage"]},
+                ],
+                "ports": default_ports(ip),
+            }
     return _states[ip]
+
+
 
 
 def get_sim_ports(ip: str) -> list:
@@ -168,6 +212,8 @@ class MdsSimulator:
         if "show version"                 in c: return self._show_version()
         if "show inventory"               in c: return self._show_inventory()
         if "show system uptime"           in c: return self._show_uptime()
+        if "show startup-config"          in c: return self._show_config()
+        if "show running-config"          in c: return self._show_config()
         return {}
 
     def send_config(self, commands: list) -> None:
@@ -194,6 +240,61 @@ class MdsSimulator:
     def _show_uptime(self):
         pc = self._state["poll_count"]
         return {"sys_uptime_str": f"{pc // 1440}d {(pc % 1440) // 60}h {pc % 60}m"}
+
+    def _show_config(self) -> dict:
+        """
+        show startup-config / show running-config.
+        Real NX-API returns this as plain text (not a TABLE_/ROW_ structure),
+        typically under a "msg" key when output_format is json. We synthesize
+        config text reflecting the simulator's CURRENT in-memory state, so
+        you can verify what a startup-config seed actually produced.
+        """
+        st = self._state
+        lines = [f"!Command: show running-config",
+                 f"!Simulated MDS switch {self.ip}", "!"]
+
+        vsans = st.get("vsans") or {}
+        if vsans:
+            lines.append("vsan database")
+            for vid, name in sorted(vsans.items()):
+                lines.append(f'  vsan {vid} name "{name}"')
+            lines.append("!")
+
+        for p in st["ports"]:
+            lines.append(f"interface {p['name']}")
+            lines.append(f"  switchport mode {p['mode']}")
+            lines.append(f"  switchport speed {p['speed_gbps'] * 1000}")
+            lines.append("  no shutdown" if p["state"] == "up" else "  shutdown")
+            lines.append("!")
+
+        if st["aliases"]:
+            lines.append("device-alias database")
+            for a in st["aliases"]:
+                lines.append(f"  device-alias name {a['name']} pwwn {a['pwwn']}")
+            lines.append("device-alias commit")
+            lines.append("!")
+
+        for z in st["zones"]:
+            lines.append(f"zone name {z['name']} vsan {z['vsan_id']}")
+            for m in z["members"]:
+                if m["type"] == "pwwn":
+                    lines.append(f"  member pwwn {m['value']}")
+                elif m["type"] == "device_alias":
+                    lines.append(f"  member device-alias {m['value']}")
+                elif m["type"] == "interface":
+                    lines.append(f"  member interface {m['value']}")
+            lines.append("!")
+
+        for zs in st["zone_sets"]:
+            lines.append(f"zoneset name {zs['name']} vsan {zs['vsan_id']}")
+            for zname in zs["zones"]:
+                lines.append(f"  member {zname}")
+            lines.append("!")
+            if zs["is_active"]:
+                lines.append(f"zoneset activate name {zs['name']} vsan {zs['vsan_id']}")
+                lines.append("!")
+
+        return {"msg": "\n".join(lines)}
 
     # -- show interface -------------------------------------------------------
     def _show_interface(self):
@@ -235,33 +336,63 @@ class MdsSimulator:
     def _sim_counter(self, port: dict, idx: int) -> dict:
         pc = self._state["poll_count"]
         if port["state"] == "down":
-            return {"interface": port["name"], "rx_frames": "0", "tx_frames": "0",
-                    "rx_words": "0", "tx_words": "0", "rx_bytes": "0", "tx_bytes": "0",
-                    "rx_crc_err": "0", "link_failures": "0"}
+            return {
+                "interface": port["name"], "last_cleared_time": "never",
+                "rx_frames": 0, "tx_frames": 0,
+                "rx_bytes": 0, "tx_bytes": 0,
+                "rx_crc_fcs": 0, "rx_link_faliures": 0,
+                "rx_discard_frames": 0, "tx_discard_frames": 0,
+                "rx_rate_bits_ps": 0, "tx_rate_bits_ps": 0,
+                "rx_rate_bytes_ps": 0, "tx_rate_bytes_ps": 0,
+                "rx_rate_frames_ps": 0, "tx_rate_frames_ps": 0,
+            }
         tx_mbps = _sim_value(port["tx_min_mbps"], port["tx_max_mbps"], pc, idx * 0.7)
         rx_mbps = _sim_value(port["rx_min_mbps"], port["rx_max_mbps"], pc, idx * 0.7 + 0.5)
         base = idx * 10_000_000
         tw = base + round(tx_mbps * 60 * 1e6 / 32) * pc
         rw = base + round(rx_mbps * 60 * 1e6 / 32) * pc
+        # The real switch reports its own live rate in bits/sec -- emit
+        # that directly (mirroring rx_mbps/tx_mbps, converted to bps)
+        # rather than requiring the poller to derive it from byte deltas.
+        rx_bps = round(rx_mbps * 1_000_000)
+        tx_bps = round(tx_mbps * 1_000_000)
         return {
-            "interface":  port["name"],
-            "rx_frames":  str(round(rw / 128)),
-            "tx_frames":  str(round(tw / 128)),
-            "rx_words":   str(rw), "tx_words": str(tw),
-            "rx_bytes":   str(rw * 4), "tx_bytes": str(tw * 4),
-            "rx_crc_err": "0", "link_failures": "0",
+            "interface":        port["name"],
+            "last_cleared_time": "never",
+            "rx_frames":        round(rw / 128),
+            "tx_frames":        round(tw / 128),
+            "rx_bytes":         rw * 4,
+            "tx_bytes":         tw * 4,
+            "rx_crc_fcs":       0,
+            "rx_link_faliures": 0,
+            "rx_discard_frames": 0,
+            "tx_discard_frames": 0,
+            "rx_rate_bits_ps":  rx_bps,
+            "tx_rate_bits_ps":  tx_bps,
+            "rx_rate_bytes_ps": round(rx_bps / 8),
+            "tx_rate_bytes_ps": round(tx_bps / 8),
+            "rx_rate_frames_ps": round(rw / 128),
+            "tx_rate_frames_ps": round(tw / 128),
         }
 
     def _show_counters(self):
-        return {"TABLE_interface": {
-            "ROW_interface": [self._sim_counter(p, i)
-                              for i, p in enumerate(self._state["ports"])]
-        }}
+        # Real schema: TABLE_counters is a top-level LIST, each entry
+        # wrapping its own ROW_counters list -- not a single dict like
+        # most other NX-API tables.
+        return {"TABLE_counters": [
+            {"ROW_counters": [
+                self._sim_counter(p, i)
+                for i, p in enumerate(self._state["ports"])
+            ]}
+        ]}
 
     # -- Transceiver ----------------------------------------------------------
     def _sim_xcvr(self, port: dict, idx: int) -> dict:
         if not port["sfp_present"] or port["state"] == "down":
-            return {"interface": port["name"], "sfp": "absent"}
+            return {
+                "interface_sfp": port["name"],
+                "TABLE_calib": {"ROW_calib": {"sfp": "sfp is not present"}},
+            }
         pc = self._state["poll_count"]
         rx = _sim_value(port["rx_pwr_min"], port["rx_pwr_max"], pc, idx * 0.6)
         tx = _sim_value(port["tx_pwr_min"], port["tx_pwr_max"], pc, idx * 0.6 + 1)
@@ -270,23 +401,40 @@ class MdsSimulator:
         curr = _sim_value(6.0, 7.5, pc, idx * 0.3)
         vendors = ["CISCO-AVAGO", "CISCO-FINISAR", "CISCO-JDSU", "CISCO-AVAGO",
                    "CISCO-FINISAR", "CISCO-JDSU", "CISCO-AVAGO", "CISCO-FINISAR"]
+        speed_mbps = port["speed_gbps"] * 1000
         return {
-            "interface": port["name"], "sfp": "present",
-            "name": vendors[idx % 8],
-            "partnum": "SFBR-5799APZ-CS5" if port["degraded"] else "AFBR-57F5PZ-CS1",
-            "serialnum": f"SIM{port['name'].replace('/', '')}{_ip_seed(self.ip) & 0xFFFF:04X}",
-            "TABLE_calibration": {"ROW_calibration": {
-                "temperature": f"{temp:.1f}",
-                "voltage":     f"{volt:.3f}",
-                "current":     f"{curr:.2f}",
-                "rx_pwr":      f"{rx:.2f}",
-                "tx_pwr":      f"{tx:.2f}",
-            }},
+            "interface_sfp": port["name"],
+            "TABLE_calib": {"ROW_calib": [
+                {
+                    # -- Static SFP identity info (real NX-API row 1) --
+                    "cisco_part_number": "10-2418-01",
+                    "cisco_product_id":  "DS-SFP-FC8G-SW" if port["speed_gbps"] == 8 else f"DS-SFP-FC{port['speed_gbps']}G-SW",
+                    "ciscoid":     "unknown (0x0)",
+                    "name":        vendors[idx % 8],
+                    "partnum":     "SFBR-5799APZ-CS5" if port["degraded"] else "AFBR-57F5PZ-CS1",
+                    "rev":         "A",
+                    "serialnum":   f"SIM{port['name'].replace('/', '')}{_ip_seed(self.ip) & 0xFFFF:04X}",
+                    "sfp":         "sfp is present",
+                    "supported_speeds": f"Min speed: {speed_mbps // 4} Mb/s, Max speed: {speed_mbps} Mb/s",
+                    "tx_length":   "short distance",
+                    "tx_medium":   "multimode laser with 62.5 um aperture (M6)",
+                    "txcvr_type":  "short wave laser w/o OFC (SN)",
+                },
+                {
+                    # -- Live readings (real NX-API row 2) --
+                    "current":        f"{curr:.2f}",
+                    "optical_rx_pwr": f"{rx:.2f}",
+                    "optical_tx_pwr": f"{tx:.2f}",
+                    "temperature":    f"{temp:.2f}",
+                    "tx_fault_type":  0,
+                    "volt":           f"{volt:.2f}",
+                },
+            ]},
         }
 
     def _show_transceiver(self):
-        return {"TABLE_interface_transceiver": {
-            "ROW_interface_transceiver": [
+        return {"TABLE_interface_trans": {
+            "ROW_interface_trans": [
                 self._sim_xcvr(p, i) for i, p in enumerate(self._state["ports"])
             ]
         }}
@@ -366,6 +514,33 @@ class MdsSimulator:
         ifaces = [p["name"] for p in self._state["ports"] if p["vsan_id"] == vsan]
         return {"TABLE_vsan_membership": {"ROW_vsan_membership": {"vsan": str(vsan), "interfaces": ifaces}}}
 
+    def _member_to_row(self, mm: dict) -> dict:
+        """Build a ROW_zone_member dict matching real NX-API shape for one member."""
+        aliases = self._state["aliases"]
+        if mm["type"] == "pwwn":
+            row = {"type": "pwwn", "wwn": mm["value"]}
+            # Annotate with the resolved device-alias name if one maps to this pwwn,
+            # exactly as a real switch does ("pwwn ... [alias_name]").
+            alias = next((a["name"] for a in aliases if a["pwwn"] == mm["value"]), None)
+            if alias:
+                row["dev_alias"] = alias
+            return row
+        if mm["type"] == "device_alias":
+            # Resolve the alias to its pwwn -- real switches always store/show
+            # device-alias zone members as a pwwn with a dev_alias annotation,
+            # never as a bare alias-only member.
+            alias_pwwn = next((a["pwwn"] for a in aliases if a["name"] == mm["value"]), None)
+            if alias_pwwn:
+                return {"type": "pwwn", "wwn": alias_pwwn, "dev_alias": mm["value"]}
+            return {"type": "pwwn", "wwn": "", "dev_alias": mm["value"]}
+        if mm["type"] == "interface":
+            return {"type": "interface", "intf_fc": mm["value"], "wwn": ""}
+        if mm["type"] == "fcid":
+            return {"type": "fcid", "fcid": mm["value"]}
+        if mm["type"] == "ip-address":
+            return {"type": "ip-address", "ipaddr": mm["value"]}
+        return {"type": mm["type"], "wwn": mm["value"]}
+
     def _show_zone(self, cmd: str):
         """show zone vsan <id> -- returns individual zones (not wrapped in a zoneset)."""
         st = self._state
@@ -373,11 +548,10 @@ class MdsSimulator:
         vf = int(m.group(1)) if m else None
         zones = [z for z in st["zones"] if not vf or z["vsan_id"] == vf]
         return {"TABLE_zone": {"ROW_zone": [
-            {"zone_name": z["name"],
+            {"name": z["name"], "vsan": z["vsan_id"],
              "TABLE_zone_member": {"ROW_zone_member": [
-                 {"wwn": mm["value"]} if mm["type"] == "pwwn" else {"device_alias": mm["value"]}
-                 for mm in z["members"]
-             ]}}
+                 self._member_to_row(mm) for mm in z["members"]
+             ]}} if z["members"] else {"name": z["name"], "vsan": z["vsan_id"]}
             for z in zones
         ]}}
 
@@ -387,14 +561,13 @@ class MdsSimulator:
         vf = int(m.group(1)) if m else None
         sets = [zs for zs in st["zone_sets"] if not vf or zs["vsan_id"] == vf]
         return {"TABLE_zoneset": {"ROW_zoneset": [
-            {"zoneset_name": zs["name"], "zoneset_vsan": str(zs["vsan_id"]),
-             "zoneset_active": str(zs["is_active"]),
+            {"name": zs["name"], "vsan": zs["vsan_id"],
+             "active": "true" if zs["is_active"] else "false",
              "TABLE_zone": {"ROW_zone": [
-                 {"zone_name": zname,
-                  "TABLE_zone_member": {"ROW_zone_member": [
-                      {"wwn": mm["value"]} if mm["type"] == "pwwn" else {"device_alias": mm["value"]}
-                      for mm in z["members"]
-                  ]}}
+                 ({"name": zname,
+                   "TABLE_zone_member": {"ROW_zone_member": [
+                       self._member_to_row(mm) for mm in z["members"]
+                   ]}} if z["members"] else {"name": zname})
                  for zname in zs["zones"]
                  for z in st["zones"] if z["name"] == zname and z["vsan_id"] == zs["vsan_id"]
              ]}}
@@ -419,12 +592,55 @@ class MdsSimulator:
                     if ei >= 0: st["aliases"][ei] = {"name": name, "pwwn": pwwn}
                     else: st["aliases"].append({"name": name, "pwwn": pwwn})
                 continue
+            no_zm = re.match(r'^no\s+zone\s+name\s+(\S+)\s+vsan\s+(\d+)$', raw.strip(), re.I)
+            if no_zm:
+                dz_name, dz_vsan = no_zm.group(1), int(no_zm.group(2))
+                st["zones"] = [z for z in st["zones"]
+                               if not (z["name"] == dz_name and z["vsan_id"] == dz_vsan)]
+                # Also remove it from any zone set that referenced it
+                for zs in st["zone_sets"]:
+                    if zs["vsan_id"] == dz_vsan and dz_name in zs["zones"]:
+                        zs["zones"].remove(dz_name)
+                cur_zone = cur_zs = None
+                continue
+
+            no_zsm = re.match(r'^no\s+zoneset\s+name\s+(\S+)\s+vsan\s+(\d+)$', raw.strip(), re.I)
+            if no_zsm:
+                dzs_name, dzs_vsan = no_zsm.group(1), int(no_zsm.group(2))
+                st["zone_sets"] = [zs for zs in st["zone_sets"]
+                                    if not (zs["name"] == dzs_name and zs["vsan_id"] == dzs_vsan)]
+                cur_zone = cur_zs = None
+                continue
+
+            act_m = re.match(r'^zoneset\s+activate\s+name\s+(\S+)\s+vsan\s+(\d+)$', raw.strip(), re.I)
+            if act_m:
+                act_name, act_vsan = act_m.group(1), int(act_m.group(2))
+                # Cisco NX-OS allows only one active zoneset per VSAN --
+                # activating one implicitly deactivates any other in the
+                # same VSAN.
+                for zs in st["zone_sets"]:
+                    if zs["vsan_id"] == act_vsan:
+                        zs["is_active"] = (zs["name"] == act_name)
+                cur_zone = cur_zs = None
+                continue
+
             zm = re.match(r'^zone name (\S+)\s+vsan\s+(\d+)$', raw.strip(), re.I)
             if zm:
                 cur_zone = zm.group(1); cur_vsan = int(zm.group(2)); cur_zs = None
                 if not any(z["name"] == cur_zone and z["vsan_id"] == cur_vsan for z in st["zones"]):
                     st["zones"].append({"name": cur_zone, "vsan_id": cur_vsan, "members": []})
                 continue
+
+            # Check for a new zoneset block BEFORE falling into zone-member
+            # parsing -- otherwise "zoneset name X vsan Y" is swallowed as a
+            # non-matching member line while cur_zone is still set.
+            zsm = re.match(r'^zoneset name (\S+)\s+vsan\s+(\d+)$', raw.strip(), re.I)
+            if zsm:
+                cur_zs = zsm.group(1); cur_vsan = int(zsm.group(2)); cur_zone = None
+                if not any(zs["name"] == cur_zs and zs["vsan_id"] == cur_vsan for zs in st["zone_sets"]):
+                    st["zone_sets"].append({"name": cur_zs, "vsan_id": cur_vsan, "is_active": False, "zones": []})
+                continue
+
             if cur_zone:
                 zone = next((z for z in st["zones"] if z["name"] == cur_zone and z["vsan_id"] == cur_vsan), None)
                 if zone:
@@ -435,12 +651,7 @@ class MdsSimulator:
                     if am and not any(mm["value"] == am.group(1) for mm in zone["members"]):
                         zone["members"].append({"type": "device_alias", "value": am.group(1)})
                 continue
-            zsm = re.match(r'^zoneset name (\S+)\s+vsan\s+(\d+)$', raw.strip(), re.I)
-            if zsm:
-                cur_zs = zsm.group(1); cur_vsan = int(zsm.group(2)); cur_zone = None
-                if not any(zs["name"] == cur_zs and zs["vsan_id"] == cur_vsan for zs in st["zone_sets"]):
-                    st["zone_sets"].append({"name": cur_zs, "vsan_id": cur_vsan, "is_active": False, "zones": []})
-                continue
+
             if cur_zs:
                 mm = re.match(r'^\s*member\s+(\S+)', raw.strip(), re.I)
                 if mm:

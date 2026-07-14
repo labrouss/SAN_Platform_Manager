@@ -197,6 +197,7 @@ var allSwitches = [];
 var currentPage = 'dashboard';
 var isDark = true;
 var charts = {};
+var _perfRefreshTimer = null;
 
 // -- Bridge init ---------------------------------------------------------------
 // Bridge uses fetch() to bridge://call -- no QWebChannel or qt.webChannelTransport needed.
@@ -370,6 +371,7 @@ async function navigate(pageId) {
     '<div class="spin border-2 border-brand border-t-transparent rounded-full w-4 h-4"></div>Loading...</div>';
   Object.values(charts).forEach(function(c) { if (c && c.destroy) c.destroy(); });
   charts = {};
+  if (_perfRefreshTimer) { clearInterval(_perfRefreshTimer); _perfRefreshTimer = null; }
   var pages = {
     dashboard: dashboard, aliases: aliases, zoning: zoning, fabric: fabric,
     inventory: inventory, sfp: sfp, performance: performance,
@@ -621,6 +623,7 @@ async function aliases() {
       data.length + ' device alias' + (data.length !== 1 ? 'es' : '') + ' on ' + escHtml(currentSwitch.display_name || currentSwitch.ip_address),
       '<input id="alias-search" oninput="filterAliases(this.value)" placeholder="Search..." class="bg-surface-2 border border-border rounded px-2.5 py-1.5 text-xs text-tx focus:outline-none focus:border-brand w-44">' +
       H.btnSec('Sync from Switch', 'syncAliases()') +
+      H.btnSuccess('Commit to Switch', 'commitAliases()') +
       H.btn('+ Add Alias', 'showAddAlias()')
     ) +
     H.card('<div id="alias-table">' + H.table(['Alias Name','WWN','Description','Status','Actions'], renderRows(data), 'No aliases yet') + '</div>')
@@ -650,24 +653,71 @@ function filterAliases(q) {
       }), 'No matches');
 }
 
-function showAddAlias() {
+async function showAddAlias() {
+  var pwwns = [];
+  try {
+    var r = JSON.parse(await call('get_all_pwwns', currentSwitch.id, currentSwitch.ip_address));
+    if (r.ok) pwwns = r.pwwns;
+  } catch(e) { /* fall back to manual entry only */ }
+
   showModal('Add FC Alias',
     '<div class="space-y-3">' +
     H.formRow('Alias Name *', H.input('m-alias-name','DB_Server_01_HBA_A')) +
-    H.formRow('WWN *', H.input('m-alias-wwn','21:00:00:24:ff:8a:1b:2c')) +
+    H.formRow('PWWN *', _pwwnPicker('', pwwns)) +
     H.formRow('Description', H.input('m-alias-desc','Optional')) +
     '<div id="m-alias-err" class="text-err text-xs hidden"></div>' +
     '<div class="flex gap-2 pt-1">' + H.btn('Save','saveAlias(null)') + H.btnSec('Cancel','closeModal()') + '</div>' +
     '</div>');
 }
 
+function _pwwnPicker(selectedWwn, pwwns) {
+  var opts = pwwns.map(function(p) {
+    var label = p.pwwn + (p.symbolic_port_name ? '  --  ' + p.symbolic_port_name : '') +
+                (p.interface ? '  (' + p.interface + ')' : '');
+    return '<option value="' + p.pwwn + '"' + (p.pwwn === selectedWwn ? ' selected' : '') + '>' + escHtml(label) + '</option>';
+  }).join('');
+  var manualSelected = selectedWwn && !pwwns.some(function(p){ return p.pwwn === selectedWwn; });
+  return (
+    '<select id="m-alias-wwn-select" onchange="_onPwwnPick()" class="w-full bg-surface-2 border border-border rounded px-3 py-1.5 text-xs text-tx focus:outline-none focus:border-brand">' +
+      '<option value="">Select a discovered PWWN...</option>' +
+      opts +
+      '<option value="__manual__"' + (manualSelected ? ' selected' : '') + '>Enter manually...</option>' +
+    '</select>' +
+    '<input id="m-alias-wwn" type="text" value="' + escHtml(selectedWwn||'') + '" placeholder="21:00:00:24:ff:8a:1b:2c" ' +
+      'class="w-full bg-surface-2 border border-border rounded px-3 py-1.5 text-xs text-tx focus:outline-none focus:border-brand mt-2' +
+      (manualSelected || !pwwns.length ? '' : ' hidden') + '">'
+  );
+}
+
+function _onPwwnPick() {
+  var sel = document.getElementById('m-alias-wwn-select');
+  var manual = document.getElementById('m-alias-wwn');
+  if (sel.value === '__manual__') {
+    manual.classList.remove('hidden');
+    manual.value = '';
+    manual.focus();
+  } else if (sel.value) {
+    manual.value = sel.value;
+    manual.classList.add('hidden');
+  } else {
+    manual.value = '';
+    manual.classList.add('hidden');
+  }
+}
+
 async function editAlias(id) {
   var a = (window._aliasData||[]).find(function(x){return x.id===id;});
   if (!a) return;
+  var pwwns = [];
+  try {
+    var r = JSON.parse(await call('get_all_pwwns', currentSwitch.id, currentSwitch.ip_address));
+    if (r.ok) pwwns = r.pwwns;
+  } catch(e) { /* fall back to manual entry only */ }
+
   showModal('Edit Alias',
     '<div class="space-y-3">' +
     H.formRow('Alias Name *', H.input('m-alias-name','',a.name)) +
-    H.formRow('WWN *', H.input('m-alias-wwn','',a.wwn)) +
+    H.formRow('PWWN *', _pwwnPicker(a.wwn, pwwns)) +
     H.formRow('Description', H.input('m-alias-desc','',a.description||'')) +
     '<div id="m-alias-err" class="text-err text-xs hidden"></div>' +
     '<div class="flex gap-2 pt-1">' + H.btn('Save','saveAlias(\'' + id + '\')') + H.btnSec('Cancel','closeModal()') + '</div>' +
@@ -680,7 +730,8 @@ async function saveAlias(id) {
   var desc = document.getElementById('m-alias-desc').value.trim();
   var errEl = document.getElementById('m-alias-err');
   if (!name) { errEl.textContent='Name required'; errEl.classList.remove('hidden'); return; }
-  if (!/^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(wwn)) { errEl.textContent='Invalid WWN'; errEl.classList.remove('hidden'); return; }
+  if (!wwn) { errEl.textContent='Select a PWWN or enter one manually'; errEl.classList.remove('hidden'); return; }
+  if (!/^([0-9a-f]{2}:){7}[0-9a-f]{2}$/i.test(wwn)) { errEl.textContent='Invalid WWN format'; errEl.classList.remove('hidden'); return; }
   var res;
   try {
     res = JSON.parse(id ? await call('update_alias',id,name,wwn,desc) : await call('create_alias',currentSwitch.id,name,wwn,desc));
@@ -704,6 +755,17 @@ async function syncAliases() {
     if (res.ok) { toast('Synced ' + res.total + ' aliases, ' + res.new + ' new','success'); await aliases(); }
     else toast(res.error,'error');
   } catch(e) { toast(String(e),'error'); }
+}
+
+async function commitAliases() {
+  if (!currentSwitch) return;
+  if (!confirm('Commit all local device aliases to the switch? This will run device-alias config commands via NX-API.')) return;
+  toast('Committing aliases to switch...', 'info');
+  try {
+    var res = JSON.parse(await call('commit_aliases', currentSwitch.id, currentSwitch.ip_address, currentUser.username));
+    if (res.ok) { toast('Committed ' + res.count + ' alias(es) to switch', 'success'); await aliases(); }
+    else toast(res.error, 'error');
+  } catch(e) { toast(String(e), 'error'); }
 }
 
 
@@ -981,8 +1043,8 @@ async function saveEditZone() {
 }
 
 async function deleteZone(id, name) {
-  if (!confirm(`Delete zone '${name}'?`)) return;
-  const res = JSON.parse(await call('delete_zone', id));
+  if (!confirm(`Delete zone '${name}'? If it was committed to the switch, it will also be removed there.`)) return;
+  const res = JSON.parse(await call('delete_zone', id, currentSwitch ? currentSwitch.ip_address : ''));
   if (res.ok) { toast('Zone deleted'); await zoning(); }
   else toast(res.error,'error');
 }
@@ -1096,14 +1158,14 @@ async function saveZoneSet() {
 
 async function activateZoneSet(id) {
   const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
-  const res = JSON.parse(await call('activate_zone_set', id, currentSwitch.id, vsan));
-  if (res.ok) { toast('Zone set activated','success'); await zoning(); }
+  const res = JSON.parse(await call('activate_zone_set', id, currentSwitch.id, vsan, currentSwitch.ip_address));
+  if (res.ok) { toast('Zone set activated on switch','success'); await zoning(); }
   else toast(res.error,'error');
 }
 
 async function deleteZoneSet(id, name) {
-  if (!confirm(`Delete zone set '${name}'?`)) return;
-  const res = JSON.parse(await call('delete_zone_set', id));
+  if (!confirm(`Delete zone set '${name}'? If it was committed to the switch, it will also be removed there.`)) return;
+  const res = JSON.parse(await call('delete_zone_set', id, currentSwitch ? currentSwitch.ip_address : ''));
   if (res.ok) { toast('Zone set deleted'); await zoning(); }
   else toast(res.error,'error');
 }
@@ -1257,6 +1319,10 @@ async function sfp() {
             <span class="font-semibold text-sm">${x.interface}</span>
             ${H.badge('Present','green')}
           </div>
+          <div class="px-4 py-2 border-b border-border">
+            <div class="text-xs text-tx-dim truncate">${escHtml(x.vendor||'--')}</div>
+            <div class="text-[10px] text-tx-muted font-mono truncate">${escHtml(x.part_number||'--')}</div>
+          </div>
           <div class="px-4 py-3 space-y-2">
             <div class="flex justify-between text-xs">
               <span class="text-tx-dim">RX Power</span>
@@ -1297,6 +1363,19 @@ async function performance() {
 
   setPage(`
     ${H.page('Performance','Port throughput and optical power history')}
+    <div class="flex items-center justify-end gap-2 mb-3 -mt-2">
+      <span id="perf-live-dot" class="hidden inline-block w-2 h-2 rounded-full bg-ok animate-pulse"></span>
+      <span id="perf-live-label" class="text-xs text-tx-dim">Auto-refresh off</span>
+      <select id="perf-refresh-interval" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx w-24">
+        <option value="5">Every 5s</option>
+        <option value="10" selected>Every 10s</option>
+        <option value="30">Every 30s</option>
+        <option value="60">Every 60s</option>
+      </select>
+      <button id="perf-live-btn" onclick="toggleLiveRefresh()" class="bg-surface-2 hover:bg-surface-3 border border-border text-tx text-xs font-medium px-3 py-1.5 rounded transition-colors">
+        Start Real-Time
+      </button>
+    </div>
     <div class="grid grid-cols-2 gap-3 mb-3">
       <!-- Top ports bar chart -->
       ${H.card(`
@@ -1373,6 +1452,63 @@ async function performance() {
   });
 
   await loadPortHistory();
+}
+
+function toggleLiveRefresh() {
+  const btn = document.getElementById('perf-live-btn');
+  const dot = document.getElementById('perf-live-dot');
+  const label = document.getElementById('perf-live-label');
+  const intervalSel = document.getElementById('perf-refresh-interval');
+
+  if (_perfRefreshTimer) {
+    // Currently running -- stop it
+    clearInterval(_perfRefreshTimer);
+    _perfRefreshTimer = null;
+    btn.textContent = 'Start Real-Time';
+    dot.classList.add('hidden');
+    label.textContent = 'Auto-refresh off';
+    intervalSel.disabled = false;
+    return;
+  }
+
+  const seconds = parseInt(intervalSel.value || '10');
+  btn.textContent = 'Stop Real-Time';
+  dot.classList.remove('hidden');
+  label.textContent = 'Live -- every ' + seconds + 's';
+  intervalSel.disabled = true;
+
+  _perfRefreshTimer = setInterval(refreshPerformanceData, seconds * 1000);
+  // Also refresh immediately so the user doesn't wait for the first tick
+  refreshPerformanceData();
+}
+
+async function refreshPerformanceData() {
+  if (!currentSwitch || currentPage !== 'performance') {
+    if (_perfRefreshTimer) { clearInterval(_perfRefreshTimer); _perfRefreshTimer = null; }
+    return;
+  }
+  try {
+    // Force an immediate poll of the switch first -- the background
+    // poller only runs on its own fixed schedule and has no idea the
+    // Performance tab wants fresher data right now. Without this the
+    // charts just redraw the same values until the background poller's
+    // own next cycle happens to land.
+    const pollRes = JSON.parse(await call('poll_now', currentSwitch.id, currentSwitch.ip_address));
+    if (!pollRes.ok) {
+      console.error('[SAN] poll_now failed:', pollRes.error);
+    }
+
+    const topPorts = JSON.parse(await call('get_top_ports', currentSwitch.id));
+    if (charts.top) {
+      charts.top.data.labels = topPorts.map(p=>p.interface_name);
+      charts.top.data.datasets[0].data = topPorts.map(p=>(p.avg_tx||0)/1e6);
+      charts.top.data.datasets[1].data = topPorts.map(p=>(p.avg_rx||0)/1e6);
+      charts.top.update();
+    }
+    await loadPortHistory();
+  } catch(e) {
+    console.error('[SAN] Live refresh error:', e);
+  }
 }
 
 async function loadPortHistory() {
@@ -2136,7 +2272,8 @@ function helpPage() {
         '<b>Add Alias</b> -- enter a name and a colon-separated WWN (e.g. 21:00:00:24:ff:8a:1b:2c).',
         '<b>Edit / Delete</b> -- use the buttons on each row.',
         '<b>Sync from Switch</b> -- pulls the live device-alias database from the switch via NX-API and imports any new entries.',
-        'Aliases marked <b>Synced</b> came from the switch. <b>Local</b> were created manually.',
+        '<b>Commit to Switch</b> -- pushes all local aliases to the switch by running device-alias config commands (device-alias database / device-alias name ... pwwn ... / device-alias commit).',
+        'Aliases marked <b>Synced</b> came from the switch, or were successfully committed. <b>Local</b> are pending commit.',
       ])
     ) +
 

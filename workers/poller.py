@@ -84,7 +84,7 @@ class MdsPoller:
 
         # -- counters -----------------------------------------------------------
         try:
-            body = client.send_command("show interface counters brief")
+            body = client.send_command("show interface counters")
             counters = parse_counters(body)
         except Exception as e:
             print(f"[Poller] counters failed for {ip}: {e}")
@@ -103,12 +103,23 @@ class MdsPoller:
             prev_key = f"{switch_id}::{iface}"
             prev = _prev_counters.get(prev_key)
 
-            tx_rate = rx_rate = None
-            if prev:
-                dt = (now - prev["ts"]).total_seconds()
-                if dt > 0:
-                    tx_rate = max(0.0, (ctr["tx_bytes"] - prev["tx_bytes"]) / dt * 8)
-                    rx_rate = max(0.0, (ctr["rx_bytes"] - prev["rx_bytes"]) / dt * 8)
+            # Prefer the switch's own hardware-computed rate (rx_rate_bits_ps /
+            # tx_rate_bits_ps from "show interface counters") -- it reflects
+            # the switch's internal sampling window, not ours, and is
+            # available even on the very first poll (no history needed).
+            # Only fall back to our own byte-delta calculation if the switch
+            # didn't report a rate at all (e.g. very old NX-OS).
+            tx_rate = ctr.get("tx_rate_bps")
+            rx_rate = ctr.get("rx_rate_bps")
+
+            if tx_rate is None or rx_rate is None:
+                if prev:
+                    dt = (now - prev["ts"]).total_seconds()
+                    if dt > 0:
+                        if tx_rate is None:
+                            tx_rate = max(0.0, (ctr["tx_bytes"] - prev["tx_bytes"]) / dt * 8)
+                        if rx_rate is None:
+                            rx_rate = max(0.0, (ctr["rx_bytes"] - prev["rx_bytes"]) / dt * 8)
 
             _prev_counters[prev_key] = {
                 "tx_bytes": ctr["tx_bytes"],

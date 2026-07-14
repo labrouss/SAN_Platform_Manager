@@ -102,20 +102,38 @@ class MdsClient:
         return output.get("body", {})
 
     def send_config(self, commands: list[str]) -> None:
-        """Send configuration commands via cli_conf."""
-        combined = " ; ".join(commands)
+        """
+        Send configuration commands via cli_conf.
+
+        NX-API's cli_conf input historically accepts semicolon-joined
+        commands, but this is NOT reliable when the sequence enters and
+        stays inside a config submode -- e.g. `zone name X` / `member pwwn Y`
+        / `zoneset name X` / `member Y`. In practice, semicolons inside
+        these submode blocks get treated as literal characters rather than
+        command separators, silently dropping or corrupting member lines.
+
+        The reliable approach -- matching how a human would type each line
+        one at a time into a CLI session -- is to POST every command as its
+        own separate cli_conf request, in order, reusing the same session
+        so the switch's config-mode state (conf t / zone name X / etc.)
+        carries over correctly between requests.
+        """
         endpoint = self._get_endpoint()
-        payload = self._build_payload("cli_conf", combined)
-        r = self._session.post(
-            f"{self._base_url}{endpoint}",
-            json=payload,
-            timeout=30,
-            verify=False,
-        )
-        if r.status_code == 401:
-            raise MdsClientError("Authentication failed")
-        if r.status_code not in (200, 201):
-            raise MdsClientError(f"Config failed: HTTP {r.status_code}")
+        for cmd in commands:
+            cmd = cmd.strip()
+            if not cmd:
+                continue
+            payload = self._build_payload("cli_conf", cmd)
+            r = self._session.post(
+                f"{self._base_url}{endpoint}",
+                json=payload,
+                timeout=30,
+                verify=False,
+            )
+            if r.status_code == 401:
+                raise MdsClientError("Authentication failed")
+            if r.status_code not in (200, 201):
+                raise MdsClientError(f"Config failed on '{cmd}': HTTP {r.status_code}")
 
     def test_connectivity(self) -> dict:
         """Verify connectivity by fetching show version. Returns version info."""

@@ -1,0 +1,46 @@
+# Dockerfile.sim -- standalone MDS 9000 NX-API simulator container
+#
+# Build:
+#   docker build -f Dockerfile.sim -t san-mds-sim .
+#
+# Run with a custom startup-config mounted in:
+#   docker run -p 8443:8443 \
+#     -v ./startup-config.txt:/config/startup-config.txt:ro \
+#     -e SAN_SIM_STARTUP_CONFIG=/config/startup-config.txt \
+#     -e SAN_SIM_IP=192.168.1.10 \
+#     san-mds-sim
+#
+# Run with the built-in default topology (no config file needed):
+#   docker run -p 8443:8443 san-mds-sim
+#
+# Then point this app's "Add Switch" at http://<container-host>:8443
+# with Simulator Mode OFF, since the container behaves like a real
+# NX-API endpoint.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Only the simulator's own dependencies are needed -- no PyQt5/WebEngine
+# required for the standalone server.
+COPY services/ ./services/
+COPY db/ ./db/
+COPY sim_server.py .
+
+# The simulator's db.database import is optional (only used to persist
+# per-port config overrides across restarts); create an empty stub dir
+# so the import doesn't fail if db/__init__.py expects a real sqlite path.
+RUN mkdir -p /root/.san-platform
+
+ENV SAN_SIM_HOST=0.0.0.0
+ENV SAN_SIM_PORT=8443
+ENV SAN_SIM_IP=127.0.0.1
+# Set this to seed from a startup-config -- see startup-config.example.txt
+# ENV SAN_SIM_STARTUP_CONFIG=/config/startup-config.txt
+
+EXPOSE 8443
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8443/health', timeout=3)" || exit 1
+
+CMD ["python", "sim_server.py"]
