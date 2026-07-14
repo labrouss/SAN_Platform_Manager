@@ -576,11 +576,15 @@ class Bridge(QObject):
                 imported += 1
 
         # -- Zone sets: "show zoneset vsan X" -------------------------------
+        # Build a name -> zone lookup from the zones we just parsed above,
+        # since "show zoneset" itself never includes zone member details --
+        # it only lists which zone NAMES belong to each zone set.
+        zones_by_name = {z["name"]: z for z in zones_data}
         zs_body = client.send_command(f"show zoneset vsan {vsan_id}")
         existing_zs = {zs["name"]: zs for zs in db.get_zone_sets(switch_id, vsan_id)}
         from db.database import get_db
 
-        for zs_data in parse_zone_sets(zs_body):
+        for zs_data in parse_zone_sets(zs_body, zones_by_name=zones_by_name):
             existing = existing_zs.get(zs_data["name"])
             zone_ids = []
             for z_info in zs_data.get("zones", []):

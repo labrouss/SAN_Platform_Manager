@@ -556,20 +556,25 @@ class MdsSimulator:
         ]}}
 
     def _show_zoneset(self, cmd: str):
+        """
+        show zoneset vsan <id>
+
+        Matches the REAL switch schema (verified against live NX-API output):
+        TABLE_zoneset -> ROW_zoneset, each with 'name', 'vsan', 'isactive'
+        ("yes"/"no"), and TABLE_zoneset_member -> ROW_zoneset_member listing
+        ONLY the zone names that belong to the set -- no member/pwwn detail
+        at all. Full zone membership must come from a separate "show zone"
+        call, exactly as it does on a real switch.
+        """
         st = self._state
         m = re.search(r'vsan\s+(\d+)', cmd, re.I)
         vf = int(m.group(1)) if m else None
         sets = [zs for zs in st["zone_sets"] if not vf or zs["vsan_id"] == vf]
         return {"TABLE_zoneset": {"ROW_zoneset": [
             {"name": zs["name"], "vsan": zs["vsan_id"],
-             "active": "true" if zs["is_active"] else "false",
-             "TABLE_zone": {"ROW_zone": [
-                 ({"name": zname,
-                   "TABLE_zone_member": {"ROW_zone_member": [
-                       self._member_to_row(mm) for mm in z["members"]
-                   ]}} if z["members"] else {"name": zname})
-                 for zname in zs["zones"]
-                 for z in st["zones"] if z["name"] == zname and z["vsan_id"] == zs["vsan_id"]
+             "isactive": "yes" if zs["is_active"] else "no",
+             "TABLE_zoneset_member": {"ROW_zoneset_member": [
+                 {"name": zname} for zname in zs["zones"]
              ]}}
             for zs in sets
         ]}}

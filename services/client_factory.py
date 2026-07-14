@@ -184,17 +184,28 @@ def parse_zones(body: dict, vsan_id: int) -> list[dict]:
     return zones
 
 
-def parse_zone_sets(body: dict) -> list[dict]:
+def parse_zone_sets(body: dict, zones_by_name: dict[str, dict] | None = None) -> list[dict]:
     """
     NX-API: show zoneset [vsan X]
-    Returns TABLE_zoneset -> ROW_zoneset, each with 'name', 'vsan',
-    'active' (bool-ish), and nested TABLE_zone -> ROW_zone (each with its
-    own 'name' and TABLE_zone_member).
 
-    Guards against TABLE_zoneset being null (some switches return this
-    rather than an empty dict when no zone sets exist) and skips any row
-    with no usable name.
+    IMPORTANT -- verified against a real switch: "show zoneset" does NOT
+    return full zone member details nested inside each zoneset. It only
+    returns TABLE_zoneset -> ROW_zoneset, each with:
+        name:      zoneset name
+        vsan:      vsan id
+        isactive:  "yes" | "no"   (NOT "active" -- different key entirely)
+        TABLE_zoneset_member -> ROW_zoneset_member: a list of member zones,
+            each ONLY {"name": "<zone name>"} -- no pwwn/member data at all.
+
+    To get real zone membership for the zones in a zoneset, you must
+    cross-reference against a separately parsed "show zone" result (see
+    parse_zones()) and match by zone name. Pass that as zones_by_name
+    (a dict of zone name -> parsed zone dict with "members"); if omitted,
+    zones are returned with an empty members list, matching exactly what
+    the switch itself would tell you from this command alone.
     """
+    zones_by_name = zones_by_name or {}
+
     table_zoneset = body.get("TABLE_zoneset") or {}
     rows = _to_array(table_zoneset.get("ROW_zoneset") if isinstance(table_zoneset, dict) else None)
     result = []
@@ -204,28 +215,31 @@ def parse_zone_sets(body: dict) -> list[dict]:
             continue  # skip unnamed/placeholder rows
 
         zones = []
-        table_zone = zs_row.get("TABLE_zone") or {}
-        if not isinstance(table_zone, dict):
-            table_zone = {}
-        for z_row in _to_array(table_zone.get("ROW_zone")):
+        member_block = zs_row.get("TABLE_zoneset_member") or {}
+        if not isinstance(member_block, dict):
+            member_block = {}
+        for z_row in _to_array(member_block.get("ROW_zoneset_member")):
             zname = (z_row.get("name") or "").strip()
             if not zname:
                 continue
-            members = []
-            member_block = z_row.get("TABLE_zone_member") or {}
-            if not isinstance(member_block, dict):
-                member_block = {}
-            for m in _to_array(member_block.get("ROW_zone_member")):
-                parsed = _parse_zone_member(m)
-                if parsed and parsed["value"]:
-                    members.append(parsed)
-            zones.append({"name": zname, "members": members})
+            # Look up real membership from the separately-fetched "show zone"
+            # result -- "show zoneset" itself never provides this.
+            known_zone = zones_by_name.get(zname)
+            zones.append({
+                "name": zname,
+                "members": known_zone["members"] if known_zone else [],
+            })
 
         try:
             vid = int(zs_row.get("vsan", 0))
         except (ValueError, TypeError):
             vid = 0
-        active_raw = zs_row.get("active", zs_row.get("zoneset_active", ""))
+
+        # isactive is the real field name ("yes"/"no"); keep the old
+        # active/zoneset_active names as a fallback for other NX-OS
+        # versions that may use them instead.
+        active_raw = zs_row.get("isactive",
+                     zs_row.get("active", zs_row.get("zoneset_active", "")))
         result.append({
             "name":      zs_name,
             "vsan_id":   vid,
