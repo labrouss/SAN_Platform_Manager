@@ -156,6 +156,12 @@
     <div class="h-9 bg-surface border-b border-border flex items-center px-4 gap-3 flex-shrink-0">
       <div id="breadcrumb" class="text-xs text-tx-dim">Dashboard</div>
       <div class="flex-1"></div>
+      <div id="config-dirty-badge" class="hidden items-center gap-2">
+        <span class="text-[10px] font-semibold bg-warn/15 text-warn border border-warn/30 rounded-full px-2.5 py-0.5">UNSAVED CONFIG</span>
+        <button onclick="saveRunningConfig()" class="bg-warn hover:bg-warn/80 text-black text-[11px] font-semibold px-2.5 py-1 rounded transition-colors">
+          Save Configuration
+        </button>
+      </div>
       <div id="sim-badge" class="hidden text-[10px] font-semibold bg-brand/10 text-brand border border-brand/30 rounded-full px-2.5 py-0.5">SIMULATOR</div>
       <div id="status-text" class="text-[11px] text-tx-muted"></div>
     </div>
@@ -297,6 +303,7 @@ function buildNav() {
     { id:'aliases',     label:'FC Aliases',       icon:'@', roles:['ADMIN','OPERATOR','VIEWER'] },
     { id:'zoning',      label:'Zone Editor',      icon:'Z', roles:['ADMIN','OPERATOR'] },
     { id:'fabric',      label:'Fabric',           icon:'F', roles:['ADMIN','OPERATOR','VIEWER'] },
+    { id:'vsans',       label:'VSANs',            icon:'V', roles:['ADMIN','OPERATOR'] },
     { id:'inventory',   label:'Port Inventory',   icon:'P', roles:['ADMIN','OPERATOR','VIEWER'] },
     { id:'sfp',         label:'SFP Health',       icon:'S', roles:['ADMIN','OPERATOR','VIEWER'] },
     { id:'performance', label:'Performance',      icon:'~', roles:['ADMIN','OPERATOR','VIEWER'] },
@@ -337,12 +344,47 @@ function onSwitchChange() {
   var id = document.getElementById('switch-select').value;
   currentSwitch = allSwitches.find(function(s) { return s.id === id; }) || null;
   updateStatusBar();
+  checkConfigDirty();
   navigate(currentPage);
 }
 
 async function checkSimMode() {
   var isSim = JSON.parse(await call('is_sim_mode'));
   document.getElementById('sim-badge').classList.toggle('hidden', !isSim);
+}
+
+async function checkConfigDirty() {
+  var badge = document.getElementById('config-dirty-badge');
+  if (!currentSwitch) { badge.classList.add('hidden'); badge.classList.remove('flex'); return; }
+  try {
+    var res = JSON.parse(await call('get_config_dirty', currentSwitch.id));
+    var dirty = !!res.dirty;
+    badge.classList.toggle('hidden', !dirty);
+    badge.classList.toggle('flex', dirty);
+  } catch(e) {
+    badge.classList.add('hidden'); badge.classList.remove('flex');
+  }
+}
+
+async function saveRunningConfig() {
+  if (!currentSwitch) return;
+  if (!confirm(
+    'Save the running configuration to startup configuration on ' +
+    (currentSwitch.display_name || currentSwitch.ip_address) + '?\n\n' +
+    'This makes all config changes made through this app (and any other ' +
+    'changes currently in the running config) persist across a switch reload.'
+  )) return;
+
+  toast('Saving configuration...', 'info');
+  try {
+    var res = JSON.parse(await call('save_running_config', currentSwitch.id, currentSwitch.ip_address));
+    if (res.ok) {
+      toast('Configuration saved to startup-config', 'success');
+      await checkConfigDirty();
+    } else {
+      toast(res.error, 'error');
+    }
+  } catch(e) { toast(String(e), 'error'); }
 }
 
 function updateStatusBar() {
@@ -374,6 +416,7 @@ async function navigate(pageId) {
   if (_perfRefreshTimer) { clearInterval(_perfRefreshTimer); _perfRefreshTimer = null; }
   var pages = {
     dashboard: dashboard, aliases: aliases, zoning: zoning, fabric: fabric,
+    vsans: vsansPage,
     inventory: inventory, sfp: sfp, performance: performance,
     snapshots: snapshots, users: users, settings: settings,
     simulator: simulatorSettings,
@@ -390,6 +433,7 @@ async function navigate(pageId) {
         '</div>';
     }
   }
+  checkConfigDirty();
 }
 
 // -- Page renderer -------------------------------------------------------------
@@ -769,8 +813,39 @@ async function commitAliases() {
 }
 
 
+// Cache of FCNS pwwn sets per VSAN, so switching VSAN repeatedly (or
+// opening multiple zone modals) doesn't re-fetch FCNS every time.
+var _fcnsPwwnCache = {};
+
+async function _aliasesForVsan(vsanId) {
+  const all = window._zoningAliases || [];
+  if (!currentSwitch || !vsanId) return all;
+
+  const key = String(vsanId);
+  if (!(key in _fcnsPwwnCache)) {
+    try {
+      const res = JSON.parse(await call('get_fcns', currentSwitch.id, currentSwitch.ip_address, parseInt(vsanId)));
+      _fcnsPwwnCache[key] = res.ok
+        ? new Set(res.entries.map(e => (e.pwwn||'').toLowerCase()))
+        : null; // null means "lookup failed, don't filter"
+    } catch(e) {
+      _fcnsPwwnCache[key] = null;
+    }
+  }
+
+  const pwwnSet = _fcnsPwwnCache[key];
+  if (!pwwnSet || pwwnSet.size === 0) {
+    // FCNS lookup failed or the VSAN has no logged-in devices yet --
+    // fall back to showing every alias rather than an empty dropdown,
+    // so pre-provisioning an alias before the device logs in still works.
+    return all;
+  }
+  return all.filter(a => pwwnSet.has((a.wwn||'').toLowerCase()));
+}
+
 async function zoning() {
   if (!currentSwitch) { setPage(noSwitch()); return; }
+  _fcnsPwwnCache = {}; // fresh page load -- don't reuse stale FCNS lookups
   const [zonesData, zoneSetsData, aliasData, switchVsans] = await Promise.all([
     call('get_zones', currentSwitch.id).then(JSON.parse),
     call('get_zone_sets', currentSwitch.id).then(JSON.parse),
@@ -843,12 +918,35 @@ async function syncVsansFromZoning() {
   } catch(e) { toast(String(e), 'error'); }
 }
 
-function filterByVsan() {
+async function filterByVsan() {
   const vsan = parseInt(document.getElementById('vsan-sel').value);
-  const zones = window._zoningAllZones.filter(z => z.vsan_id === vsan);
-  const sets  = window._zoningAllSets.filter(z => z.vsan_id === vsan);
-  document.getElementById('zones-table').innerHTML = renderZonesTable(zones);
-  document.getElementById('zsets-table').innerHTML = renderZoneSetsTable(sets);
+  // Show cached data immediately for responsiveness...
+  const cachedZones = window._zoningAllZones.filter(z => z.vsan_id === vsan);
+  const cachedSets  = window._zoningAllSets.filter(z => z.vsan_id === vsan);
+  document.getElementById('zones-table').innerHTML = renderZonesTable(cachedZones);
+  document.getElementById('zsets-table').innerHTML = renderZoneSetsTable(cachedSets);
+
+  // ...then pull fresh data from the switch for this VSAN. Switching the
+  // VSAN dropdown previously only filtered whatever was already cached
+  // locally -- if the user had never pulled that VSAN before, it always
+  // showed empty (this is why only VSAN 1 ever appeared to "work": it was
+  // usually the first/only VSAN ever explicitly pulled).
+  if (!currentSwitch) return;
+  try {
+    const res = JSON.parse(await call('pull_zones', currentSwitch.id, currentSwitch.ip_address, vsan));
+    if (!res.ok) { toast('Could not pull VSAN ' + vsan + ': ' + res.error, 'error'); return; }
+    // Refresh local caches from DB and re-render for the selected VSAN
+    const [zonesData, zoneSetsData] = await Promise.all([
+      call('get_zones', currentSwitch.id).then(JSON.parse),
+      call('get_zone_sets', currentSwitch.id).then(JSON.parse),
+    ]);
+    window._zoningAllZones = zonesData;
+    window._zoningAllSets  = zoneSetsData;
+    document.getElementById('zones-table').innerHTML = renderZonesTable(zonesData.filter(z => z.vsan_id === vsan));
+    document.getElementById('zsets-table').innerHTML = renderZoneSetsTable(zoneSetsData.filter(z => z.vsan_id === vsan));
+  } catch(e) {
+    toast('Error pulling VSAN ' + vsan + ': ' + String(e), 'error');
+  }
 }
 
 function filterZones(q) {
@@ -909,9 +1007,9 @@ function renderZoneSetsTable(sets) {
 }
 
 // Zone CRUD
-function showAddZone() {
+async function showAddZone() {
   const vsan = document.getElementById('vsan-sel')?.value || 100;
-  const aliases = window._zoningAliases || [];
+  const aliases = await _aliasesForVsan(vsan);
   const aliasOpts = `<option value="">Select alias...</option>` +
     aliases.map(a=>`<option value="${escHtml(a.name)}" data-type="DEVICE_ALIAS">${escHtml(a.name)} (${a.wwn.slice(0,17)}...)</option>`).join('');
 
@@ -919,7 +1017,10 @@ function showAddZone() {
     <div class="space-y-3">
       ${H.formRow('Zone Name *', H.input('m-zone-name',`Zone_Name_VSAN${vsan}`))}
       <div class="border-t border-border pt-3">
-        <div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide mb-2">Initial Members</div>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide">Initial Members</div>
+          <div class="text-[10px] text-tx-muted">Aliases shown: VSAN ${vsan} only</div>
+        </div>
         <div class="flex flex-wrap gap-2 mb-2">
           <select id="m-zone-alias-sel" class="flex-1 min-w-[160px] bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx">${aliasOpts}</select>
           <input id="m-zone-wwn" placeholder="or WWN manually" class="flex-1 min-w-[140px] bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx focus:outline-none focus:border-brand">
@@ -1001,7 +1102,7 @@ async function saveNewZone() {
 async function editZone(id) {
   const zone = window._zoningAllZones.find(z => z.id === id);
   if (!zone) return;
-  const aliases = window._zoningAliases || [];
+  const aliases = await _aliasesForVsan(zone.vsan_id);
   const aliasOpts = `<option value="">Select alias...</option>` +
     aliases.map(a=>`<option value="${escHtml(a.name)}">${escHtml(a.name)} (${a.wwn.slice(0,17)}...)</option>`).join('');
 
@@ -1012,7 +1113,10 @@ async function editZone(id) {
     <div class="space-y-3">
       ${H.formRow('Zone Name *', H.input('m-zone-name','',zone.name))}
       <div class="border-t border-border pt-3">
-        <div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide mb-2">Members</div>
+        <div class="flex items-center justify-between mb-2">
+          <div class="text-[10px] font-bold text-tx-muted uppercase tracking-wide">Members</div>
+          <div class="text-[10px] text-tx-muted">Aliases shown: VSAN ${zone.vsan_id} only</div>
+        </div>
         <div class="flex flex-wrap gap-2 mb-2">
           <select id="m-zone-alias-sel" class="flex-1 min-w-[160px] bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx">${aliasOpts}</select>
           <input id="m-zone-wwn" placeholder="or WWN" class="flex-1 min-w-[140px] bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx focus:outline-none focus:border-brand">
@@ -1181,9 +1285,16 @@ async function commitZones() {
 
 async function pullZones() {
   const vsan = parseInt(document.getElementById('vsan-sel')?.value || 100);
-  toast('Pulling zones from switch...','info');
+  toast('Pulling zones for VSAN ' + vsan + ' from switch...','info');
   const res = JSON.parse(await call('pull_zones', currentSwitch.id, currentSwitch.ip_address, vsan));
-  if (res.ok) { toast(`Pulled . ${res.imported} new zones`,'success'); await zoning(); }
+  if (res.ok) {
+    if (res.imported === 0 && res.updated === 0) {
+      toast('VSAN ' + vsan + ': switch reports no zones/zone sets configured', 'info');
+    } else {
+      toast(`Pulled VSAN ${vsan}: ${res.imported} new, ${res.updated} updated`, 'success');
+    }
+    await zoning();
+  }
   else toast(res.error,'error');
 }
 
@@ -1201,8 +1312,9 @@ async function fabric() {
   var vsanIds = switchVsans.length ? switchVsans.map(function(v){return v.vsan_id;}) : [100,200,300];
   var fabVsanOpts = vsanIds.map(function(v){return '<option value="'+v+'">VSAN '+v+'</option>';}).join('');
   var fabActions =
+    '<input id="fab-search" oninput="filterFcns(this.value)" placeholder="Search WWN / alias / interface..." class="bg-surface-2 border border-border rounded px-2.5 py-1.5 text-xs text-tx focus:outline-none focus:border-brand w-56">' +
     '<label class="text-xs text-tx-dim">VSAN:</label>' +
-    '<select id="fab-vsan" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx w-28">' +
+    '<select id="fab-vsan" onchange="loadFcns()" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx w-28">' +
     fabVsanOpts + '</select>' +
     H.btnSec('Sync VSANs','syncVsansFromFabric()') +
     H.btnSec('Refresh','loadFcns()');
@@ -1229,11 +1341,31 @@ async function loadFcns() {
   const container = document.getElementById('fcns-content');
   if (!res.ok) { container.className = ''; container.innerHTML = `<p class="text-err text-sm">${res.error}</p>`; return; }
   container.className = '';
-  const entries = res.entries;
-  container.innerHTML = H.card(H.table(
-    ['pWWN','FCID','Vendor','FC4 Type','Interface','Symbolic Name'],
+  window._fcnsEntries = res.entries;
+  renderFcnsTable(res.entries);
+}
+
+function filterFcns(q) {
+  let entries = window._fcnsEntries || [];
+  if (q) {
+    const needle = q.toLowerCase();
+    entries = entries.filter(e =>
+      (e.pwwn||'').toLowerCase().includes(needle) ||
+      (e.alias||'').toLowerCase().includes(needle) ||
+      (e.connected_interface||'').toLowerCase().includes(needle) ||
+      (e.symbolic_port_name||'').toLowerCase().includes(needle) ||
+      (e.vendor||'').toLowerCase().includes(needle)
+    );
+  }
+  renderFcnsTable(entries);
+}
+
+function renderFcnsTable(entries) {
+  document.getElementById('fcns-content').innerHTML = H.card(H.table(
+    ['pWWN','Alias','FCID','Vendor','FC4 Type','Interface','Symbolic Name'],
     entries.map(e=>[
       `<code class="mono text-[11px]">${e.pwwn}</code>`,
+      e.alias ? escHtml(e.alias) : '<span class="text-tx-muted">--</span>',
       `<code class="mono text-[11px] text-brand">${e.fcid}</code>`,
       escHtml(e.vendor||'--'), escHtml(e.fc4_types||'--'),
       escHtml(e.connected_interface||'--'), escHtml(e.symbolic_port_name||'--'),
@@ -1242,16 +1374,194 @@ async function loadFcns() {
   ));
 }
 
+// -- VSANS -----------------------------------------------------------------------
+async function vsansPage() {
+  if (!currentSwitch) { setPage(noSwitch()); return; }
+
+  var vsanActions =
+    H.btnSec('Sync from Switch','syncVsansFromVsanPage()') +
+    H.btn('+ Add VSAN','showAddVsan()');
+  setPage(
+    H.page('VSANs', 'View, create, rename, suspend, and sync VSANs on ' + escHtml(currentSwitch.display_name||currentSwitch.ip_address), vsanActions) +
+    '<div id="vsans-content" class="flex items-center justify-center h-32 text-tx-dim text-sm">' +
+    '<div class="spin border-2 border-brand border-t-transparent rounded-full w-4 h-4 mr-2"></div>Loading...</div>'
+  );
+
+  await loadVsansTable();
+}
+
+async function loadVsansTable() {
+  var vsans = [];
+  try { vsans = JSON.parse(await call('get_switch_vsans', currentSwitch.id)); } catch(e) {}
+  window._vsansList = vsans;
+  renderVsansTable(vsans);
+}
+
+function renderVsansTable(vsans) {
+  const container = document.getElementById('vsans-content');
+  container.className = '';
+  container.innerHTML = H.card(H.table(
+    ['VSAN ID', 'Name', 'State', 'Last Synced', 'Actions'],
+    vsans.map(function(v) {
+      const isSuspended = (v.state||'').toLowerCase() === 'suspended';
+      return [
+        '<code class="mono font-medium">' + v.vsan_id + '</code>',
+        escHtml(v.name || ('VSAN' + v.vsan_id)),
+        H.badge(isSuspended ? 'SUSPENDED' : 'ACTIVE', isSuspended ? 'yellow' : 'green'),
+        v.synced_at ? fmtDate(v.synced_at) : '<span class="text-tx-muted">Never</span>',
+        '<div class="flex gap-1.5 justify-end">' +
+          H.btnSec('Rename', "showRenameVsan(" + v.vsan_id + ",'" + escHtml(v.name||'') + "')") +
+          (isSuspended
+            ? H.btnSuccess('Resume', 'toggleVsanSuspend(' + v.vsan_id + ', false)')
+            : H.btnDanger('Suspend', 'toggleVsanSuspend(' + v.vsan_id + ', true)')) +
+          (v.vsan_id !== 1 ? H.btnDanger('Delete', "confirmDeleteVsan(" + v.vsan_id + ",'" + escHtml(v.name||'') + "')") : '') +
+        '</div>',
+      ];
+    }),
+    'No VSANs discovered yet -- click Sync from Switch'
+  ));
+}
+
+async function syncVsansFromVsanPage() {
+  if (!currentSwitch) return;
+  toast('Syncing VSANs from switch...', 'info');
+  try {
+    const res = JSON.parse(await call('sync_vsans', currentSwitch.id, currentSwitch.ip_address));
+    if (res.ok) { toast('Discovered ' + res.count + ' VSAN(s)', 'success'); await loadVsansTable(); }
+    else toast(res.error, 'error');
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+function showAddVsan() {
+  showModal('Add VSAN', `
+    <div class="space-y-3">
+      ${H.formRow('VSAN ID *', H.input('m-vsan-id','e.g. 300'))}
+      ${H.formRow('Name (optional)', H.input('m-vsan-name','e.g. Backup_Fabric'))}
+      <div class="text-xs text-tx-dim bg-surface-2 rounded p-2.5">
+        Pushed to the switch immediately via:
+        <code class="font-mono block mt-1 text-[11px]">conf t / vsan database / vsan &lt;id&gt; [name &lt;name&gt;] / end</code>
+      </div>
+      <div id="m-vsan-err" class="text-err text-xs hidden"></div>
+      <div class="flex gap-2 pt-1">
+        ${H.btn('Create VSAN','saveNewVsan()')}
+        ${H.btnSec('Cancel','closeModal()')}
+      </div>
+    </div>
+  `);
+}
+
+async function saveNewVsan() {
+  const id = document.getElementById('m-vsan-id').value.trim();
+  const name = document.getElementById('m-vsan-name').value.trim();
+  const errEl = document.getElementById('m-vsan-err');
+  const vid = parseInt(id);
+  if (!id || isNaN(vid) || vid < 1 || vid > 4094) {
+    errEl.textContent = 'Enter a valid VSAN ID (1-4094)';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  try {
+    const res = JSON.parse(await call('create_vsan', currentSwitch.id, currentSwitch.ip_address, id, name));
+    if (res.ok) {
+      closeModal();
+      toast('VSAN ' + id + ' created on switch', 'success');
+      window._vsansList = res.vsans || window._vsansList;
+      renderVsansTable(window._vsansList);
+      if (res.warning) toast(res.warning, 'info');
+    } else {
+      errEl.textContent = res.error; errEl.classList.remove('hidden');
+    }
+  } catch(e) { errEl.textContent = String(e); errEl.classList.remove('hidden'); }
+}
+
+function showRenameVsan(vsanId, currentName) {
+  showModal('Rename VSAN ' + vsanId, `
+    <div class="space-y-3">
+      ${H.formRow('Name *', H.input('m-vsan-rename', 'e.g. Production_Fabric', currentName))}
+      <div id="m-vsan-rename-err" class="text-err text-xs hidden"></div>
+      <div class="flex gap-2 pt-1">
+        ${H.btn('Save','saveRenameVsan(' + vsanId + ')')}
+        ${H.btnSec('Cancel','closeModal()')}
+      </div>
+    </div>
+  `);
+}
+
+async function saveRenameVsan(vsanId) {
+  const name = document.getElementById('m-vsan-rename').value.trim();
+  const errEl = document.getElementById('m-vsan-rename-err');
+  if (!name) { errEl.textContent = 'Name required'; errEl.classList.remove('hidden'); return; }
+  try {
+    const res = JSON.parse(await call('rename_vsan', currentSwitch.id, currentSwitch.ip_address, String(vsanId), name));
+    if (res.ok) {
+      closeModal();
+      toast('VSAN ' + vsanId + ' renamed', 'success');
+      window._vsansList = res.vsans || window._vsansList;
+      renderVsansTable(window._vsansList);
+    } else {
+      errEl.textContent = res.error; errEl.classList.remove('hidden');
+    }
+  } catch(e) { errEl.textContent = String(e); errEl.classList.remove('hidden'); }
+}
+
+async function toggleVsanSuspend(vsanId, suspend) {
+  if (suspend && !confirm(
+    'Suspend VSAN ' + vsanId + '?\n\n' +
+    'This takes down every port currently assigned to this VSAN on the switch, immediately. ' +
+    'Traffic through this VSAN will stop until it is resumed.'
+  )) return;
+
+  try {
+    const res = JSON.parse(await call('set_vsan_suspended', currentSwitch.id, currentSwitch.ip_address, String(vsanId), suspend));
+    if (res.ok) {
+      toast('VSAN ' + vsanId + (suspend ? ' suspended' : ' resumed'), 'success');
+      window._vsansList = res.vsans || window._vsansList;
+      renderVsansTable(window._vsansList);
+    } else {
+      toast(res.error, 'error');
+    }
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+async function confirmDeleteVsan(vsanId, name) {
+  if (!confirm(
+    'Delete VSAN ' + vsanId + (name ? ' (' + name + ')' : '') + '?\n\n' +
+    'All ports currently in this VSAN will fall back to the isolated VSAN on the switch and stop passing traffic. ' +
+    'Any zones/zone sets configured under this VSAN on the switch will also be removed by the switch itself. ' +
+    'This cannot be undone.'
+  )) return;
+
+  try {
+    const res = JSON.parse(await call('delete_vsan', currentSwitch.id, currentSwitch.ip_address, String(vsanId)));
+    if (res.ok) {
+      toast('VSAN ' + vsanId + ' deleted', 'success');
+      window._vsansList = res.vsans || window._vsansList;
+      renderVsansTable(window._vsansList);
+    } else {
+      toast(res.error, 'error');
+    }
+  } catch(e) { toast(String(e), 'error'); }
+}
+
 // -- INVENTORY -----------------------------------------------------------------
 async function inventory() {
   if (!currentSwitch) { setPage(noSwitch()); return; }
+
+  var switchVsans = [];
+  try { switchVsans = JSON.parse(await call('get_switch_vsans', currentSwitch.id)); } catch(e) {}
+  window._invVsanMeta = switchVsans;
+
   var invActions =
-    '<input id="inv-search" oninput="filterInv(this.value)" placeholder="Search..." class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx focus:outline-none focus:border-brand w-40">' +
+    '<input id="inv-search" oninput="filterInv(this.value)" placeholder="Search name / WWN / alias..." class="bg-surface-2 border border-border rounded px-2.5 py-1.5 text-xs text-tx focus:outline-none focus:border-brand w-52">' +
+    '<select id="inv-vsan" onchange="filterInv(document.getElementById(\'inv-search\').value)" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx w-28">' +
+    '<option value="">VSAN: ALL</option>' +
+    switchVsans.map(function(v){ return '<option value="'+v.vsan_id+'">VSAN '+v.vsan_id+(v.name?' ('+escHtml(v.name)+')':'')+'</option>'; }).join('') +
+    '</select>' +
     '<select id="inv-status" onchange="filterInv(document.getElementById(\'inv-search\').value)" class="bg-surface-2 border border-border rounded px-2 py-1.5 text-xs text-tx">' +
     '<option value="">All States</option><option>up</option><option>down</option><option>trunking</option></select>' +
     H.btnSec('Refresh','inventory()');
   setPage(
-    H.page('Port Inventory','FC interface list with state, speed, and WWN', invActions) +
+    H.page('Port Inventory','FC interface list with state, speed, VSAN and WWN', invActions) +
     '<div id="inv-content" class="flex items-center justify-center h-32 text-tx-dim text-sm">' +
     '<div class="spin border-2 border-brand border-t-transparent rounded-full w-4 h-4 mr-2"></div>Loading...</div>'
   );
@@ -1265,9 +1575,19 @@ async function inventory() {
 
 function filterInv(q) {
   const sf = document.getElementById('inv-status')?.value || '';
+  const vf = document.getElementById('inv-vsan')?.value || '';
   let ports = window._invPorts || [];
-  if (q) ports = ports.filter(p => p.name.toLowerCase().includes(q.toLowerCase()) || (p.peer_wwn||'').includes(q.toLowerCase()) || (p.alias||'').toLowerCase().includes(q.toLowerCase()));
+  if (q) {
+    const needle = q.toLowerCase();
+    ports = ports.filter(p =>
+      p.name.toLowerCase().includes(needle) ||
+      (p.peer_wwn||'').toLowerCase().includes(needle) ||
+      (p.port_wwn||'').toLowerCase().includes(needle) ||
+      (p.alias||'').toLowerCase().includes(needle)
+    );
+  }
   if (sf) ports = ports.filter(p => p.state === sf);
+  if (vf) ports = ports.filter(p => String(p.vsan) === vf);
   renderInvTable(ports);
 }
 
@@ -1275,18 +1595,56 @@ function renderInvTable(ports) {
   const stateColor = {up:'green',trunking:'green',down:'red',isolated:'yellow'};
   var invContainer = document.getElementById('inv-content');
   invContainer.className = '';
+  const vsanOpts = (window._invVsanMeta||[]).map(v => [String(v.vsan_id), 'VSAN '+v.vsan_id]);
   invContainer.innerHTML = H.card(H.table(
     ['Interface','State','Mode','Speed','VSAN','Peer WWN','Alias'],
     ports.map(p=>[
       `<code class="mono font-medium">${p.name}</code>`,
       H.badge(p.state.toUpperCase(), stateColor[p.state]||'blue'),
-      p.mode, p.speed?`${parseInt(p.speed)>1000?parseInt(p.speed)/1000+'G':p.speed}`:'--',
-      p.vsan||'--',
+      p.mode, p.speed || '--',
+      vsanOpts.length
+        ? '<select onchange="setPortVsan(\'' + p.name + '\', this.value, this)" class="bg-surface-2 border border-border rounded px-2 py-1 text-xs text-tx focus:outline-none focus:border-brand cursor-pointer">' +
+          '<option value="">--</option>' +
+          vsanOpts.map(function(v) { return '<option value="'+v[0]+'"'+(v[0]===String(p.vsan||'')?' selected':'')+'>'+v[1]+'</option>'; }).join('') +
+          '</select>'
+        : escHtml(p.vsan || '--'),
       p.peer_wwn ? `<code class="mono text-[11px] text-tx-dim">${p.peer_wwn}</code>` : '--',
       escHtml(p.alias||'--'),
     ]),
     'No FC interfaces found'
   ));
+}
+
+async function setPortVsan(interfaceName, vsanId, selectEl) {
+  if (!currentSwitch) return;
+  if (!vsanId) return; // "--" selected, nothing to push
+
+  const prevValue = (window._invPorts||[]).find(x => x.name === interfaceName)?.vsan || '';
+
+  if (!confirm(
+    'Move ' + interfaceName + ' to VSAN ' + vsanId + '?\n\n' +
+    'This pushes a live config change to the switch (vsan database / ' +
+    'vsan ' + vsanId + ' interface ' + interfaceName + ' force) and will ' +
+    'take effect immediately, including on an active port.'
+  )) {
+    if (selectEl) selectEl.value = prevValue;
+    return;
+  }
+
+  try {
+    const res = JSON.parse(await call('set_port_vsan', currentSwitch.id, currentSwitch.ip_address, interfaceName, vsanId));
+    if (res.ok) {
+      toast(interfaceName + ' moved to VSAN ' + vsanId + ' on the switch', 'success');
+      const p = (window._invPorts||[]).find(x => x.name === interfaceName);
+      if (p) p.vsan = vsanId;
+    } else {
+      toast(res.error, 'error');
+      if (selectEl) selectEl.value = prevValue;
+    }
+  } catch(e) {
+    toast(String(e), 'error');
+    if (selectEl) selectEl.value = prevValue;
+  }
 }
 
 // -- SFP -----------------------------------------------------------------------
@@ -1857,6 +2215,12 @@ async function editSwitch(id) {
   var vsans = [];
   try { vsans = JSON.parse(await call('get_switch_vsans', id)); } catch(e) {}
 
+  var retentionDays = 90;
+  try {
+    var rr = JSON.parse(await call('get_metrics_retention', id));
+    if (rr.ok) retentionDays = rr.days;
+  } catch(e) {}
+
   var vsanRows = vsans.length
     ? vsans.map(function(v) {
         return '<div class="flex items-center justify-between border-b border-border py-1.5 text-xs">' +
@@ -1900,6 +2264,26 @@ async function editSwitch(id) {
     }).join('') +
     '</div></div>' +
     '<div class="border-t border-border pt-4">' +
+    '<div class="text-xs font-bold text-tx-muted uppercase tracking-wide mb-1">Performance Data Retention</div>' +
+    '<p class="text-xs text-tx-dim mb-3">How long port throughput/optical metrics are kept for this switch before being automatically deleted. Checked roughly every hour by the background poller.</p>' +
+    '<div class="flex flex-wrap gap-2 mb-3">' +
+    [[1,'1 day'],[7,'7 days'],[30,'30 days'],[90,'90 days'],[0,'Keep forever']].map(function(opt) {
+      var active = retentionDays === opt[0];
+      return '<button onclick="setSwitchRetention(\'' + id + '\',' + opt[0] + ')" class="text-xs font-medium px-3 py-1.5 rounded border transition-colors ' +
+        (active ? 'bg-brand text-white border-brand' : 'bg-surface-2 text-tx border-border hover:border-brand') + '">' + opt[1] + '</button>';
+    }).join('') +
+    '</div>' +
+    '<div class="flex items-center gap-2 mb-3">' +
+      '<span class="text-xs text-tx-dim">Custom:</span>' +
+      H.input('m-sw-retention-custom', 'days', retentionDays > 0 && ![1,7,30,90].includes(retentionDays) ? String(retentionDays) : '') +
+      H.btnSec('Set', 'setSwitchRetentionCustom(\'' + id + '\')') +
+    '</div>' +
+    '<div class="flex gap-2">' +
+      H.btnSec('Purge data older than retention now', 'purgeOldMetricsNow(\'' + id + '\')') +
+      H.btnDanger('Delete ALL performance data', 'deleteAllMetricsNow(\'' + id + '\')') +
+    '</div>' +
+    '</div>' +
+    '<div class="border-t border-border pt-4">' +
     '<div class="flex items-center justify-between mb-1">' +
       '<div class="text-xs font-bold text-tx-muted uppercase tracking-wide">VSANs</div>' +
       H.btnSec('Sync VSANs', 'syncVsansFromModal(\'' + id + '\',\'' + sw.ip_address + '\')') +
@@ -1926,6 +2310,50 @@ async function syncVsansFromModal(id, ip) {
     var res = JSON.parse(await call('sync_vsans', id, ip));
     if (res.ok) {
       toast('Discovered ' + res.count + ' VSAN(s)', 'success');
+      editSwitch(id);
+    } else {
+      toast(res.error, 'error');
+    }
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+async function setSwitchRetention(id, days) {
+  try {
+    var res = JSON.parse(await call('set_metrics_retention', id, String(days)));
+    if (res.ok) {
+      toast(days === 0 ? 'Performance data will be kept forever' : 'Retention set to ' + days + ' day(s)', 'success');
+      editSwitch(id);
+    } else {
+      toast(res.error, 'error');
+    }
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+async function setSwitchRetentionCustom(id) {
+  var val = document.getElementById('m-sw-retention-custom').value.trim();
+  var days = parseInt(val);
+  if (isNaN(days) || days < 0) { toast('Enter a valid number of days (0 or more)', 'error'); return; }
+  await setSwitchRetention(id, days);
+}
+
+async function purgeOldMetricsNow(id) {
+  try {
+    var res = JSON.parse(await call('purge_old_metrics_for_switch', id));
+    if (res.ok) {
+      toast(res.note || ('Purged ' + res.deleted + ' old metric row(s)'), 'success');
+      editSwitch(id);
+    } else {
+      toast(res.error, 'error');
+    }
+  } catch(e) { toast(String(e), 'error'); }
+}
+
+async function deleteAllMetricsNow(id) {
+  if (!confirm('Delete ALL performance data for this switch? This cannot be undone.')) return;
+  try {
+    var res = JSON.parse(await call('delete_all_metrics_for_switch', id));
+    if (res.ok) {
+      toast('Deleted ' + res.deleted + ' metric row(s)', 'success');
       editSwitch(id);
     } else {
       toast(res.error, 'error');
@@ -2292,10 +2720,22 @@ function helpPage() {
     section('[F]', 'Fabric Discovery',
       '<p>Displays the FCNS (Fabric Controller Name Server) database for a selected VSAN.</p>' +
       ul([
-        'Shows each logged-in device: pWWN, FCID, vendor, FC4 type, interface, and symbolic name.',
+        'Shows each logged-in device: pWWN, alias, FCID, vendor, FC4 type, interface, and symbolic name.',
         'Select a different VSAN using the dropdown and click Refresh.',
+        'Search box filters by pWWN, alias, interface, or vendor.',
         '<b>Sync VSANs</b> -- runs <code class="font-mono bg-surface-2 px-1 rounded">show vsan</code> on the switch and refreshes the VSAN dropdown automatically.',
         'In simulator mode this shows the simulated fabric topology.',
+      ])
+    ) +
+
+    section('[V]', 'VSANs',
+      '<p>View, create, rename, suspend/resume, and delete VSANs on the active switch. All actions push live config changes to the switch immediately.</p>' +
+      ul([
+        '<b>Sync from Switch</b> -- runs <code class="font-mono bg-surface-2 px-1 rounded">show vsan</code> and refreshes the list.',
+        '<b>Add VSAN</b> -- creates a new VSAN (ID 1-4094) with an optional name.',
+        '<b>Rename</b> -- changes a VSAN\'s name on the switch.',
+        '<b>Suspend</b> -- takes down every port currently in that VSAN, immediately. Used to preconfigure a VSAN before bringing it live, or to take one out of service. <b>Resume</b> brings it back.',
+        '<b>Delete</b> -- removes the VSAN from the switch. Ports in it fall back to the isolated VSAN and stop passing traffic; any zones/zone sets under that VSAN are also removed by the switch. VSAN 1 (the default) cannot be deleted.',
       ])
     ) +
 
@@ -2360,7 +2800,17 @@ function helpPage() {
         '<b>Database Statistics</b> -- live counts of all stored objects.',
         '<b>Download Backup</b> -- opens a Save dialog and exports all data as JSON.',
         '<b>Restore from Backup</b> -- merges a JSON backup; existing records are preserved.',
-        '<b>Purge old metrics</b> -- deletes all port metric rows to reclaim disk space.',
+        '<b>Purge old metrics</b> (this page) -- deletes ALL port metric rows across every switch, ignoring any per-switch retention setting. For per-switch, age-based cleanup, use the <b>Performance Data Retention</b> section inside each switch\'s Settings modal (click Edit on a switch in the table above) instead.',
+      ])
+    ) +
+
+    section('[V]', 'Performance Data Retention (per switch)',
+      '<p>Each switch has its own performance-data retention window, set from that switch\'s Settings modal (Settings > switch table > Edit).</p>' +
+      ul([
+        'Choose a preset (1 / 7 / 30 / 90 days) or enter a custom number of days. <b>Keep forever</b> disables automatic purging for that switch.',
+        'The background poller checks every switch\'s retention setting roughly once an hour and deletes anything older than the window -- no manual action needed once set.',
+        '<b>Purge data older than retention now</b> -- applies the current setting immediately instead of waiting for the next hourly sweep.',
+        '<b>Delete ALL performance data</b> -- removes every metric row for that switch immediately, regardless of the retention setting. Cannot be undone.',
       ])
     ) +
 
@@ -2383,6 +2833,7 @@ function helpPage() {
         'All tables support <b>live search</b> -- type to filter instantly.',
         'The <b>breadcrumb</b> at the top shows the current page and active switch.',
         'The <b>SIMULATOR</b> badge appears in the top bar when simulator mode is active.',
+        'The <b>UNSAVED CONFIG</b> badge appears whenever this app has pushed a config change to the switch (zone commit, alias commit, VSAN create/rename/suspend/delete, port VSAN reassignment, etc.) that has not yet been saved to startup-config. Click <b>Save Configuration</b> next to it to run <code class="font-mono bg-surface-2 px-1 rounded">copy running-config startup-config</code> -- without this, a switch reload discards everything pushed since the last save.',
         'Run <code class="font-mono bg-surface-2 px-1 rounded">python main.py --reset-db</code> to wipe the database and start fresh.',
         'Database is stored at <code class="font-mono bg-surface-2 px-1 rounded">~/.san-platform/san_platform.db</code> (SQLite).',
       ]) +

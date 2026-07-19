@@ -20,7 +20,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +97,16 @@ CREATE TABLE IF NOT EXISTS vsans (
     UNIQUE(switch_id, vsan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_vsans_switch ON vsans(switch_id);
+
+CREATE TABLE IF NOT EXISTS port_vsan_overrides (
+    id          TEXT PRIMARY KEY,
+    switch_id   TEXT NOT NULL REFERENCES switches(id) ON DELETE CASCADE,
+    interface   TEXT NOT NULL,
+    vsan_id     INTEGER,
+    updated_at  TEXT NOT NULL,
+    UNIQUE(switch_id, interface)
+);
+CREATE INDEX IF NOT EXISTS idx_port_vsan_overrides_switch ON port_vsan_overrides(switch_id);
 
 CREATE TABLE IF NOT EXISTS fc_aliases (
     id          TEXT PRIMARY KEY,
@@ -361,6 +371,35 @@ def get_vsans(switch_id: str) -> list[dict]:
         return [row_to_dict(r) for r in rows]
 
 
+def get_port_vsan_overrides(switch_id: str) -> dict[str, int]:
+    """Return {interface: vsan_id} for all manual VSAN overrides on a switch."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT interface, vsan_id FROM port_vsan_overrides WHERE switch_id=?",
+            (switch_id,)
+        ).fetchall()
+        return {r["interface"]: r["vsan_id"] for r in rows if r["vsan_id"] is not None}
+
+
+def set_port_vsan_override(switch_id: str, interface: str, vsan_id: int | None) -> None:
+    """Set (or clear, if vsan_id is None) a manual VSAN override for one port."""
+    now = _now()
+    with get_db() as conn:
+        if vsan_id is None:
+            conn.execute(
+                "DELETE FROM port_vsan_overrides WHERE switch_id=? AND interface=?",
+                (switch_id, interface)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO port_vsan_overrides(id, switch_id, interface, vsan_id, updated_at) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(switch_id, interface) DO UPDATE SET "
+                "vsan_id=excluded.vsan_id, updated_at=excluded.updated_at",
+                (str(__import__("uuid").uuid4()), switch_id, interface, vsan_id, now)
+            )
+
+
 def replace_vsans(switch_id: str, vsans: list[dict]) -> list[dict]:
     """Replace all VSANs for a switch with a freshly-synced list (upsert by vsan_id)."""
     now = _now()
@@ -385,6 +424,12 @@ def replace_vsans(switch_id: str, vsans: list[dict]) -> list[dict]:
                 )
                 seen_ids.add(new_id)
     return get_vsans(switch_id)
+
+
+def delete_vsan(switch_id: str, vsan_id: int) -> None:
+    """Remove a VSAN record locally (called after the switch confirms deletion)."""
+    with get_db() as conn:
+        conn.execute("DELETE FROM vsans WHERE switch_id=? AND vsan_id=?", (switch_id, vsan_id))
 
 
 # -- FC ALIASES -----------------------------------------------------------------
@@ -702,6 +747,60 @@ def get_distinct_interfaces(switch_id: str) -> list[str]:
             (switch_id,)
         ).fetchall()
         return [r[0] for r in rows]
+
+
+def get_metrics_retention_days(switch_id: str) -> int:
+    """Per-switch performance data retention window, in days. 0 = keep forever."""
+    val = get_setting(f"switch_{switch_id}_metrics_retention_days", "90")
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return 90
+
+
+def set_metrics_retention_days(switch_id: str, days: int) -> None:
+    set_setting(f"switch_{switch_id}_metrics_retention_days", str(max(0, int(days))))
+
+
+def purge_old_metrics(switch_id: str, older_than_days: int) -> int:
+    """
+    Delete port_metrics rows for one switch older than the given number of
+    days. older_than_days <= 0 means "keep forever" -- no-op, returns 0.
+    Returns the number of rows deleted.
+    """
+    if older_than_days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+    with get_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM port_metrics WHERE switch_id=? AND timestamp < ?",
+            (switch_id, cutoff)
+        )
+        return cur.rowcount
+
+
+def purge_all_metrics_for_switch(switch_id: str) -> int:
+    """Delete ALL performance data for one switch, regardless of age."""
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM port_metrics WHERE switch_id=?", (switch_id,))
+        return cur.rowcount
+
+
+def purge_old_metrics_all_switches() -> dict[str, int]:
+    """
+    Run retention-based purge for every switch using its own configured
+    retention window. Called periodically by the background poller.
+    Returns {switch_id: rows_deleted} for switches where anything was purged.
+    """
+    results = {}
+    for sw in get_all_switches():
+        days = get_metrics_retention_days(sw["id"])
+        if days <= 0:
+            continue
+        deleted = purge_old_metrics(sw["id"], days)
+        if deleted:
+            results[sw["id"]] = deleted
+    return results
 
 def get_db_stats() -> dict:
     with get_db() as conn:

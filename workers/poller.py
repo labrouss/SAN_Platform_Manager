@@ -36,6 +36,7 @@ class MdsPoller:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.on_update = on_update  # optional callback after each poll
+        self._last_retention_purge: float = 0.0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -56,7 +57,27 @@ class MdsPoller:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             self._poll_all()
+            self._maybe_purge_old_metrics()
             self._stop_event.wait(self.poll_interval())
+
+    def _maybe_purge_old_metrics(self) -> None:
+        """
+        Apply each switch's configured performance-data retention window,
+        deleting anything older than it. Retention is expressed in days,
+        so there's no need to check this on every poll cycle (which may
+        run every few seconds) -- once an hour is more than sufficient
+        and avoids adding needless DB overhead to frequent polling.
+        """
+        now = time.time()
+        if now - self._last_retention_purge < 3600:
+            return
+        self._last_retention_purge = now
+        try:
+            results = db.purge_old_metrics_all_switches()
+            for switch_id, deleted in results.items():
+                print(f"[Poller] Retention purge: deleted {deleted} old metric rows for switch {switch_id}")
+        except Exception as e:
+            print(f"[Poller] Retention purge failed: {e}")
 
     def _poll_all(self) -> None:
         switches = db.get_all_switches()

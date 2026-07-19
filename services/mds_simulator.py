@@ -122,7 +122,10 @@ def _get_state(ip: str) -> dict:
                 "zones": copy.deepcopy(cfg["zones"]),
                 "zone_sets": copy.deepcopy(cfg["zone_sets"]),
                 "ports": copy.deepcopy(cfg["ports"]),
-                "vsans": dict(cfg.get("vsans", {})),
+                "vsans": {
+                    str(vid): {"name": name, "state": "active"}
+                    for vid, name in dict(cfg.get("vsans", {})).items()
+                },
             }
         else:
             _states[ip] = {
@@ -142,6 +145,7 @@ def _get_state(ip: str) -> dict:
                      "zones": ["Zone_DB_to_Storage", "Zone_App_to_Storage"]},
                 ],
                 "ports": default_ports(ip),
+                "vsans": {},
             }
     return _states[ip]
 
@@ -256,8 +260,11 @@ class MdsSimulator:
         vsans = st.get("vsans") or {}
         if vsans:
             lines.append("vsan database")
-            for vid, name in sorted(vsans.items()):
+            for vid, meta in sorted(vsans.items(), key=lambda kv: int(kv[0])):
+                name = meta.get("name") if isinstance(meta, dict) else meta
                 lines.append(f'  vsan {vid} name "{name}"')
+                if isinstance(meta, dict) and meta.get("state") == "suspended":
+                    lines.append(f'  vsan {vid} suspend')
             lines.append("!")
 
         for p in st["ports"]:
@@ -298,23 +305,32 @@ class MdsSimulator:
 
     # -- show interface -------------------------------------------------------
     def _show_interface(self):
+        """
+        show interface (full form)
+
+        Field names confirmed against a real switch: oper_port_state (NOT
+        state), port_vsan (NOT vsan), oper_speed as a string WITH unit
+        suffix e.g. "16 Gbps" (NOT a bare Mbps number).
+        """
         ports = self._state["ports"]
         aliases = self._state["aliases"]
         rows = []
         for i, port in enumerate(ports):
             alias = aliases[i] if i < len(aliases) else None
             rows.append({
-                "interface":     port["name"],
-                "state":         port["state"],
-                "admin_state":   "up",
-                "admin_mode":    port["mode"],
-                "oper_mode":     port["mode"],
-                "oper_speed":    str(port["speed_gbps"] * 1000),
-                "port_wwn":      _make_wwn("20:00:de:fb", self.ip, i + 1),
-                "peer_port_wwn": alias["pwwn"] if alias else "",
-                "vsan":          str(port["vsan_id"]),
+                "interface":        port["name"],
+                "oper_port_state":  port["state"],
+                "port_down_reason": None if port["state"] == "up" else "Administratively down",
+                "hardware":         "Fibre Channel",
+                "sfp":              f"{port['speed_gbps']}G_SW" if port.get("sfp_present") else None,
+                "admin_mode":       port["mode"],
+                "oper_mode":        port["mode"] if port["state"] == "up" else "auto",
+                "oper_speed":       f"{port['speed_gbps']} Gbps" if port["state"] == "up" else "",
+                "port_wwn":         _make_wwn("20:00:de:fb", self.ip, i + 1),
+                "peer_port_wwn":    alias["pwwn"] if alias else "",
+                "port_vsan":        port["vsan_id"],
                 "fcid": f"0x{port['vsan_id'] * 0x10000 + i + 1:06x}" if port["state"] == "up" else "",
-                "description":   alias["name"] if alias else "",
+                "description":      alias["name"] if alias else "",
             })
         return {"TABLE_interface": {"ROW_interface": rows}}
 
@@ -502,11 +518,33 @@ class MdsSimulator:
         ]}}
 
     def _show_vsan(self, cmd: str):
-        vsans = list({p["vsan_id"] for p in self._state["ports"]})
-        return {"TABLE_vsan": {"ROW_vsan": [
-            {"vsan_id": str(v), "vsan_name": f"VSAN{v}", "vsan_state": "active"}
-            for v in vsans
-        ]}}
+        st = self._state
+        vsans = st.get("vsans") or {}
+        # Auto-register any VSAN referenced by a port but not yet in the
+        # vsans dict (e.g. seed data assigns ports to VSANs 100/200 without
+        # an explicit "vsan database" block) -- mirrors real switch
+        # behavior where a port's VSAN always implicitly exists.
+        port_vsans = {p["vsan_id"] for p in st["ports"]}
+        changed = False
+        for v in port_vsans:
+            if v and str(v) not in vsans:
+                vsans[str(v)] = {"name": f"VSAN{v}", "state": "active"}
+                changed = True
+        if changed:
+            st["vsans"] = vsans
+
+        all_ids = sorted(set(int(v) for v in vsans.keys()) | port_vsans)
+        rows = []
+        for v in all_ids:
+            if not v:
+                continue
+            meta = vsans.get(str(v), {})
+            rows.append({
+                "vsan_id":   str(v),
+                "vsan_name": meta.get("name") or f"VSAN{v}",
+                "vsan_state": meta.get("state", "active"),
+            })
+        return {"TABLE_vsan": {"ROW_vsan": rows}}
 
     def _show_vsan_membership(self, cmd: str):
         m = re.search(r'vsan\s+(\d+)', cmd, re.I)
@@ -584,6 +622,7 @@ class MdsSimulator:
         cur_zone = cur_zs = None
         cur_vsan = 100
         in_alias = False
+        in_vsan_db = False
         for raw in commands:
             c = raw.strip().lower()
             if not c or c in ("conf t", "end"): continue
@@ -597,6 +636,70 @@ class MdsSimulator:
                     if ei >= 0: st["aliases"][ei] = {"name": name, "pwwn": pwwn}
                     else: st["aliases"].append({"name": name, "pwwn": pwwn})
                 continue
+
+            if c == "vsan database":
+                in_vsan_db = True
+                continue
+            if in_vsan_db:
+                vsans = st.setdefault("vsans", {})
+
+                # "no vsan <id>" -- delete the VSAN entirely. Ports that
+                # were in it fall back to VSAN 1 (the real switch moves
+                # them to the isolated VSAN 4094, but for simulation
+                # purposes reverting to VSAN 1 is close enough and keeps
+                # test data legible).
+                no_del_m = re.match(r'^no\s+vsan\s+(\d+)$', raw.strip(), re.I)
+                if no_del_m:
+                    del_vsan = int(no_del_m.group(1))
+                    vsans.pop(str(del_vsan), None)
+                    for p in st["ports"]:
+                        if p["vsan_id"] == del_vsan:
+                            p["vsan_id"] = 1
+                    continue
+
+                # "no vsan <id> suspend" -- resume/activate a suspended VSAN
+                no_susp_m = re.match(r'^no\s+vsan\s+(\d+)\s+suspend$', raw.strip(), re.I)
+                if no_susp_m:
+                    vid = str(int(no_susp_m.group(1)))
+                    vsans.setdefault(vid, {"name": f"VSAN{vid}", "state": "active"})["state"] = "active"
+                    continue
+
+                # "vsan <id> suspend" -- suspend a VSAN (takes down all its ports)
+                susp_m = re.match(r'^vsan\s+(\d+)\s+suspend$', raw.strip(), re.I)
+                if susp_m:
+                    vid = str(int(susp_m.group(1)))
+                    vsans.setdefault(vid, {"name": f"VSAN{vid}", "state": "active"})["state"] = "suspended"
+                    continue
+
+                # "vsan <id> name <name>" -- rename (or implicitly create) a VSAN
+                name_m = re.match(r'^vsan\s+(\d+)\s+name\s+(\S+)$', raw.strip(), re.I)
+                if name_m:
+                    vid, new_name = str(int(name_m.group(1))), name_m.group(2)
+                    vsans.setdefault(vid, {"name": new_name, "state": "active"})["name"] = new_name
+                    continue
+
+                # "vsan <id> interface <iface> [force]" -- moves a port to
+                # a different VSAN. A port belongs to exactly one VSAN, so
+                # this implicitly removes it from whatever VSAN it was in.
+                vm = re.match(r'^vsan\s+(\d+)\s+interface\s+(\S+)(?:\s+force)?$', raw.strip(), re.I)
+                if vm:
+                    new_vsan, iface_name = int(vm.group(1)), vm.group(2)
+                    port = next((p for p in st["ports"] if p["name"].lower() == iface_name.lower()), None)
+                    if port:
+                        port["vsan_id"] = new_vsan
+                    continue
+
+                # "vsan <id>" (bare) -- create a new VSAN
+                create_m = re.match(r'^vsan\s+(\d+)$', raw.strip(), re.I)
+                if create_m:
+                    vid = str(int(create_m.group(1)))
+                    vsans.setdefault(vid, {"name": f"VSAN{vid}", "state": "active"})
+                    continue
+
+                # Any other line ends the vsan-db submode
+                in_vsan_db = False
+                # fall through to allow this line to be matched normally
+
             no_zm = re.match(r'^no\s+zone\s+name\s+(\S+)\s+vsan\s+(\d+)$', raw.strip(), re.I)
             if no_zm:
                 dz_name, dz_vsan = no_zm.group(1), int(no_zm.group(2))

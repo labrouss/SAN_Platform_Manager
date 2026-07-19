@@ -26,7 +26,7 @@ from db import database as db
 from services.client_factory import (
     authenticate, hash_password, build_client, store_credentials,
     parse_device_aliases, parse_zone_sets, parse_zones, parse_vsans,
-    parse_fcns, parse_transceiver, parse_interface_brief, parse_counters,
+    parse_fcns, parse_transceiver, parse_interface_full, parse_counters,
     is_sim
 )
 
@@ -42,6 +42,18 @@ class Bridge(QObject):
     # Signals the frontend can connect to
     poll_updated = pyqtSignal()
     notify = pyqtSignal(str, str)   # (type: "success"|"error"|"info", message)
+
+    def _push_config(self, client, switch_id: str, cmds: list) -> None:
+        """
+        Send config commands to the switch and mark it as having unsaved
+        running-config changes (config_dirty). Every code path that pushes
+        config to a switch should go through this so the Settings page's
+        "Save Configuration" prompt reliably appears -- a switch reload
+        before running-config is copied to startup-config silently
+        discards everything pushed since the last save.
+        """
+        client.send_config(cmds)
+        db.set_setting(f"switch_{switch_id}_config_dirty", "true")
 
     # -- Auth -------------------------------------------------------------------
 
@@ -164,6 +176,151 @@ class Bridge(QObject):
             import traceback
             return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
 
+    @pyqtSlot(str, str, str, str, result=str)
+    def create_vsan(self, switch_id: str, ip: str, vsan_id: str, name: str) -> str:
+        """
+        Create a new VSAN on the switch:
+            conf t
+            vsan database
+              vsan <id>
+              vsan <id> name <name>     (only if a name was given)
+            end
+        Then re-sync so the local DB reflects the switch's authoritative state.
+        """
+        try:
+            vid_str = str(vsan_id).strip()
+            if not vid_str:
+                return _j({"ok": False, "error": "A VSAN ID is required"})
+            try:
+                vid = int(vid_str)
+            except ValueError:
+                return _j({"ok": False, "error": f"Invalid VSAN ID: {vsan_id}"})
+            if not (1 <= vid <= 4094):
+                return _j({"ok": False, "error": "VSAN ID must be between 1 and 4094"})
+
+            client = build_client(switch_id, ip)
+            cmds = ["conf t", "vsan database", f"  vsan {vid}"]
+            name = (name or "").strip()
+            if name:
+                cmds.append(f"  vsan {vid} name {name}")
+            cmds.append("end")
+            self._push_config(client, switch_id, cmds)
+
+            sync_result = json.loads(self.sync_vsans(switch_id, ip))
+            if not sync_result.get("ok"):
+                return _j({"ok": True, "warning": "Created, but could not re-sync: " + sync_result.get("error", "")})
+            return _j({"ok": True, "vsans": sync_result["vsans"]})
+        except Exception as e:
+            import traceback
+            return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
+
+    @pyqtSlot(str, str, str, str, result=str)
+    def rename_vsan(self, switch_id: str, ip: str, vsan_id: str, name: str) -> str:
+        """conf t / vsan database / vsan <id> name <name> / end"""
+        try:
+            vid = int(vsan_id)
+            name = (name or "").strip()
+            if not name:
+                return _j({"ok": False, "error": "A name is required"})
+
+            client = build_client(switch_id, ip)
+            cmds = ["conf t", "vsan database", f"  vsan {vid} name {name}", "end"]
+            self._push_config(client, switch_id, cmds)
+
+            sync_result = json.loads(self.sync_vsans(switch_id, ip))
+            if not sync_result.get("ok"):
+                return _j({"ok": True, "warning": "Renamed, but could not re-sync: " + sync_result.get("error", "")})
+            return _j({"ok": True, "vsans": sync_result["vsans"]})
+        except Exception as e:
+            import traceback
+            return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
+
+    @pyqtSlot(str, str, str, bool, result=str)
+    def set_vsan_suspended(self, switch_id: str, ip: str, vsan_id: str, suspended: bool) -> str:
+        """
+        Suspend or resume a VSAN:
+            conf t
+            vsan database
+              vsan <id> suspend        (to suspend)
+              no vsan <id> suspend     (to resume/activate)
+            end
+
+        Suspending a VSAN takes down every port assigned to it -- this is
+        confirmed, intentional Cisco behavior (used to preconfigure a VSAN
+        fabric-wide before bringing it live). The UI must warn clearly
+        before calling this with suspended=True.
+        """
+        try:
+            vid = int(vsan_id)
+            client = build_client(switch_id, ip)
+            action = f"  vsan {vid} suspend" if suspended else f"  no vsan {vid} suspend"
+            cmds = ["conf t", "vsan database", action, "end"]
+            self._push_config(client, switch_id, cmds)
+
+            sync_result = json.loads(self.sync_vsans(switch_id, ip))
+            if not sync_result.get("ok"):
+                return _j({"ok": True, "warning": "Applied, but could not re-sync: " + sync_result.get("error", "")})
+            return _j({"ok": True, "vsans": sync_result["vsans"]})
+        except Exception as e:
+            import traceback
+            return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
+
+    @pyqtSlot(str, str, str, result=str)
+    def delete_vsan(self, switch_id: str, ip: str, vsan_id: str) -> str:
+        """
+        Delete a VSAN from the switch:
+            conf t
+            vsan database
+              no vsan <id>
+            end
+
+        All ports that were in this VSAN fall back to the isolated VSAN
+        (4094) on the switch -- they are NOT removed from the switch, but
+        they stop passing traffic until manually reassigned. Zones/zone
+        sets configured under this VSAN on the switch are also removed by
+        the switch itself. The UI must warn clearly before this call.
+        """
+        try:
+            vid = int(vsan_id)
+            if vid == 1:
+                return _j({"ok": False, "error": "VSAN 1 is the default VSAN and cannot be deleted"})
+
+            client = build_client(switch_id, ip)
+            cmds = ["conf t", "vsan database", f"  no vsan {vid}", "end"]
+            self._push_config(client, switch_id, cmds)
+
+            db.delete_vsan(switch_id, vid)
+            sync_result = json.loads(self.sync_vsans(switch_id, ip))
+            vsans = sync_result.get("vsans") if sync_result.get("ok") else db.get_vsans(switch_id)
+            return _j({"ok": True, "vsans": vsans})
+        except Exception as e:
+            import traceback
+            return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
+
+    @pyqtSlot(str, str, result=str)
+    def save_running_config(self, switch_id: str, ip: str) -> str:
+        """
+        Persist the switch's current running configuration to startup
+        configuration ("copy running-config startup-config"), so config
+        changes made through this app (or any other means) survive a
+        switch reload. Without this, a reload reverts to whatever was
+        last saved, silently discarding everything since.
+        """
+        try:
+            client = build_client(switch_id, ip)
+            client.send_config(["copy running-config startup-config"])
+            db.set_setting(f"switch_{switch_id}_config_dirty", "false")
+            return _j({"ok": True})
+        except Exception as e:
+            import traceback
+            return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
+
+    @pyqtSlot(str, result=str)
+    def get_config_dirty(self, switch_id: str) -> str:
+        """Whether this switch has unsaved running-config changes made via this app."""
+        dirty = db.get_setting(f"switch_{switch_id}_config_dirty", "false") == "true"
+        return _j({"dirty": dirty})
+
     # -- Aliases ----------------------------------------------------------------
 
     @pyqtSlot(str, result=str)
@@ -229,7 +386,7 @@ class Bridge(QObject):
                 cmds.append(f"  device-alias name {a['name']} pwwn {a['wwn']}")
             cmds.append("device-alias commit")
             cmds.append("end")
-            client.send_config(cmds)
+            self._push_config(client, switch_id, cmds)
 
             now = db._now()
             for a in aliases:
@@ -288,7 +445,7 @@ class Bridge(QObject):
                         f"no zone name {switch_name} vsan {zone['vsan_id']}",
                         "end",
                     ]
-                    client.send_config(cmds)
+                    self._push_config(client, zone["switch_id"], cmds)
                 except Exception as e:
                     return _j({"ok": False,
                                "error": f"Failed to remove zone from switch: {e}"})
@@ -365,7 +522,7 @@ class Bridge(QObject):
                         f"no zoneset name {switch_name} vsan {zs['vsan_id']}",
                         "end",
                     ]
-                    client.send_config(cmds)
+                    self._push_config(client, zs["switch_id"], cmds)
                 except Exception as e:
                     return _j({"ok": False,
                                "error": f"Failed to remove zone set from switch: {e}"})
@@ -442,7 +599,7 @@ class Bridge(QObject):
                     f"zoneset activate name {switch_name} vsan {vsan_id}",
                     "end",
                 ]
-                client.send_config(cmds)
+                self._push_config(client, switch_id, cmds)
             except Exception as e:
                 return _j({"ok": False,
                            "error": f"Activated locally but failed to push to switch: {e}"})
@@ -502,7 +659,7 @@ class Bridge(QObject):
                 if zs.get("is_active"):
                     cmds.append(f"zoneset activate name {zs['name']} vsan {vsan_id}")
             cmds.append("end")
-            client.send_config(cmds)
+            self._push_config(client, switch_id, cmds)
             now = db._now()
             for z in zones:
                 db.update_zone(z["id"], is_draft=False, synced_at=now, last_synced_name=z["name"])
@@ -682,33 +839,83 @@ class Bridge(QObject):
     def get_inventory(self, switch_id: str, ip: str) -> str:
         try:
             client = build_client(switch_id, ip)
-            # Use show interface brief -- lighter, returns state+speed+vsan per port
-            body  = client.send_command("show interface brief")
-            ports = parse_interface_brief(body)
-            # Enrich with peer WWN from show flogi database
-            try:
-                flogi_body = client.send_command("show flogi database")
-                flogi_rows = flogi_body.get("TABLE_flogi_entry", {}).get("ROW_flogi_entry", [])
-                if isinstance(flogi_rows, dict): flogi_rows = [flogi_rows]
-                # Map interface -> peer wwn
-                flogi_map = {r.get("interface","").strip(): r.get("port_name","").strip().lower()
-                             for r in flogi_rows if r.get("interface") and r.get("port_name")}
-            except Exception:
-                flogi_map = {}
+            # Use the FULL "show interface" -- confirmed against a real
+            # switch to reliably include port_vsan; "show interface brief"
+            # does not on all NX-OS versions/platforms, which is why the
+            # VSAN column was blank.
+            body  = client.send_command("show interface")
+            ports = parse_interface_full(body)
+
             aliases = {a["wwn"]: a["name"] for a in db.get_aliases(switch_id)}
+            # Manual VSAN overrides the user has set from the UI (per-port),
+            # keyed by interface name, take precedence over whatever the
+            # switch itself reports for display purposes only -- the
+            # override is informational until pushed via a VSAN membership
+            # config command (not yet wired to a config push).
+            overrides = db.get_port_vsan_overrides(switch_id)
+
             result = []
             for p in ports:
-                peer_wwn = flogi_map.get(p["name"], "")
+                peer_wwn = p["peer_wwn"]
+                vsan = overrides.get(p["name"], p["vsan_id"] or None)
                 result.append({
                     "name":     p["name"],
                     "state":    p["state"],
                     "mode":     p["mode"],
                     "speed":    p["speed"],
-                    "vsan":     str(p["vsan_id"]) if p["vsan_id"] else "--",
+                    "vsan":     str(vsan) if vsan else "--",
                     "peer_wwn": peer_wwn,
                     "alias":    aliases.get(peer_wwn, ""),
                 })
             return _j({"ok": True, "ports": result})
+        except Exception as e:
+            import traceback
+            return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
+
+    @pyqtSlot(str, str, str, str, result=str)
+    def set_port_vsan(self, switch_id: str, ip: str, interface: str, vsan_id: str) -> str:
+        """
+        Assign a physical FC port to a different VSAN -- pushed live to the
+        switch via the real NX-OS config sequence:
+
+            conf t
+            vsan database
+              vsan <id> interface <interface> force
+            end
+
+        A port can only belong to one VSAN at a time, so simply assigning
+        it to the new VSAN automatically removes it from whatever VSAN it
+        was in before -- MDS has no "no vsan X interface Y" command (some
+        docs mention it, but it isn't actually supported; Cisco confirms
+        interfaces can only be moved, never removed from all VSANs).
+
+        The `force` keyword suppresses the interactive y/n confirmation
+        the switch normally prompts for when moving an online port, which
+        would otherwise hang a non-interactive API call.
+        """
+        try:
+            vid_str = str(vsan_id).strip()
+            if not vid_str:
+                return _j({"ok": False, "error": "A VSAN ID is required"})
+            try:
+                vid = int(vid_str)
+            except ValueError:
+                return _j({"ok": False, "error": f"Invalid VSAN ID: {vsan_id}"})
+
+            client = build_client(switch_id, ip)
+            cmds = [
+                "conf t",
+                "vsan database",
+                f"  vsan {vid} interface {interface} force",
+                "end",
+            ]
+            self._push_config(client, switch_id, cmds)
+
+            # Mirror the change locally so Port Inventory reflects it
+            # immediately without waiting for the next full inventory poll.
+            db.set_port_vsan_override(switch_id, interface, vid)
+
+            return _j({"ok": True})
         except Exception as e:
             import traceback
             return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
@@ -718,9 +925,36 @@ class Bridge(QObject):
         try:
             client = build_client(switch_id, ip)
             fcns = parse_fcns(client.send_command(f"show fcns database detail vsan {vsan_id}"))
+
+            # FCNS entries are frequently sparse (many devices don't
+            # register symbolic name / vendor / connected_interface with
+            # the fabric at all) -- enrich with show flogi database, which
+            # almost always has the real connected interface even when
+            # FCNS doesn't, and resolve each pwwn to a local FC alias name
+            # if one is known.
+            try:
+                flogi_body = client.send_command(f"show flogi database vsan {vsan_id}")
+                flogi_rows = flogi_body.get("TABLE_flogi_entry", {}).get("ROW_flogi_entry", [])
+                if isinstance(flogi_rows, dict):
+                    flogi_rows = [flogi_rows]
+                flogi_map = {
+                    (r.get("port_name") or "").strip().lower(): (r.get("interface") or "").strip()
+                    for r in flogi_rows if r.get("port_name") and r.get("interface")
+                }
+            except Exception:
+                flogi_map = {}
+
+            aliases = {a["wwn"]: a["name"] for a in db.get_aliases(switch_id)}
+
+            for e in fcns:
+                if not e.get("connected_interface"):
+                    e["connected_interface"] = flogi_map.get(e["pwwn"], None)
+                e["alias"] = aliases.get(e["pwwn"], None)
+
             return _j({"ok": True, "entries": fcns})
         except Exception as e:
-            return _j({"ok": False, "error": str(e)})
+            import traceback
+            return _j({"ok": False, "error": str(e), "trace": traceback.format_exc()})
 
     @pyqtSlot(str, str, result=str)
     def get_all_pwwns(self, switch_id: str, ip: str) -> str:
@@ -1002,5 +1236,58 @@ class Bridge(QObject):
             return _j({'ok': True, 'deleted': deleted})
         except Exception as e:
             return _j({'ok': False, 'error': str(e)})
+
+    @pyqtSlot(str, result=str)
+    def get_metrics_retention(self, switch_id: str) -> str:
+        """Return this switch's performance data retention window in days (0 = forever)."""
+        try:
+            days = db.get_metrics_retention_days(switch_id)
+            return _j({"ok": True, "days": days})
+        except Exception as e:
+            return _j({"ok": False, "error": str(e)})
+
+    @pyqtSlot(str, str, result=str)
+    def set_metrics_retention(self, switch_id: str, days: str) -> str:
+        """
+        Set this switch's performance data retention window (in days).
+        0 means "keep forever" (no automatic purge). Takes effect on the
+        background poller's next scheduled retention sweep, and can be
+        applied immediately via purge_old_metrics_for_switch.
+        """
+        try:
+            d = int(days)
+            if d < 0:
+                return _j({"ok": False, "error": "Retention days cannot be negative"})
+            db.set_metrics_retention_days(switch_id, d)
+            return _j({"ok": True, "days": d})
+        except (ValueError, TypeError):
+            return _j({"ok": False, "error": f"Invalid days value: {days}"})
+        except Exception as e:
+            return _j({"ok": False, "error": str(e)})
+
+    @pyqtSlot(str, result=str)
+    def purge_old_metrics_for_switch(self, switch_id: str) -> str:
+        """
+        Immediately apply this switch's configured retention window,
+        deleting any performance data older than it. Does nothing if
+        retention is set to 0 (keep forever).
+        """
+        try:
+            days = db.get_metrics_retention_days(switch_id)
+            if days <= 0:
+                return _j({"ok": True, "deleted": 0, "note": "Retention set to keep forever -- nothing purged"})
+            deleted = db.purge_old_metrics(switch_id, days)
+            return _j({"ok": True, "deleted": deleted})
+        except Exception as e:
+            return _j({"ok": False, "error": str(e)})
+
+    @pyqtSlot(str, result=str)
+    def delete_all_metrics_for_switch(self, switch_id: str) -> str:
+        """Delete ALL performance data for one switch, regardless of retention setting."""
+        try:
+            deleted = db.purge_all_metrics_for_switch(switch_id)
+            return _j({"ok": True, "deleted": deleted})
+        except Exception as e:
+            return _j({"ok": False, "error": str(e)})
 
 

@@ -264,40 +264,62 @@ def parse_zone_sets(body: dict, zones_by_name: dict[str, dict] | None = None) ->
 
 
 # -- Interface: parse "show interface brief" -----------------------------------
-def parse_interface_brief(body: dict) -> list[dict]:
+def parse_interface_full(body: dict) -> list[dict]:
     """
-    NX-API: show interface brief
-    Returns TABLE_interface_brief_if -> ROW_interface_brief_if (FC ports only).
-    Key fields: interface, vsan, admin_mode, status, oper_mode, oper_speed, fcot_info.
+    NX-API: show interface  (the FULL form -- NOT "show interface brief")
+
+    Confirmed against a real switch (live-tested): "show interface brief"
+    does not reliably return per-port VSAN membership on all NX-OS
+    versions/platforms, which is why Port Inventory's VSAN column showed
+    blank. The full "show interface" form reliably includes it.
+
+    Real field names (verified against live switch output):
+        interface:        "fc1/1"
+        oper_port_state:  "up" | "down" | ...     (NOT "state")
+        port_down_reason: e.g. "Administratively down" (nullable)
+        sfp:              e.g. "16G_SW" or null/absent if no SFP
+        port_wwn:         the port's OWN wwn
+        peer_port_wwn:    the wwn logged into this port (nullable)
+        admin_mode / oper_mode: "auto" | "F" | "E" | "TE" | ...
+        fcid:             "0xbe1a01" (nullable if down)
+        port_vsan:        integer                  (NOT "vsan")
+        oper_speed:       "16 Gbps"  -- STRING WITH UNIT SUFFIX, not a
+                          bare Mbps number. parseInt-style extraction of
+                          the leading digits gives the speed in Gbps
+                          directly (no /1000 conversion needed).
     """
-    # NX-API may return either TABLE_interface_brief_if or TABLE_interface_brief
-    rows = _to_array(
-        body.get("TABLE_interface_brief_if", {}).get("ROW_interface_brief_if") or
-        body.get("TABLE_interface_brief", {}).get("ROW_interface_brief")
-    )
+    rows = _to_array(body.get("TABLE_interface", {}).get("ROW_interface"))
     result = []
     for r in rows:
         iface = (r.get("interface") or "").strip()
         if not iface.lower().startswith("fc"):
             continue
+
         try:
-            vsan = int(r.get("vsan", 0) or 0)
+            vsan = int(r.get("port_vsan")) if r.get("port_vsan") not in (None, "") else 0
         except (ValueError, TypeError):
             vsan = 0
-        speed_raw = str(r.get("oper_speed") or r.get("speed") or "0").strip()
-        # speed may be "8000", "8G", "8 Gbps" etc
-        speed_clean = re.sub(r"[^0-9]", "", speed_raw)
-        speed_mbps  = int(speed_clean) if speed_clean else 0
-        # If speed is in Gbps (e.g. "8") convert to Mbps
-        if speed_mbps and speed_mbps <= 256:
-            speed_mbps *= 1000
+
+        # oper_speed is a string like "16 Gbps" -- extract the leading
+        # digits directly as Gbps (do NOT treat as Mbps / divide by 1000).
+        speed_raw = str(r.get("oper_speed") or "").strip()
+        speed_match = re.match(r"(\d+)", speed_raw)
+        speed_gbps = int(speed_match.group(1)) if speed_match else 0
+
+        state = (r.get("oper_port_state") or "unknown").strip().lower()
+        mode  = (r.get("oper_mode") or r.get("admin_mode") or "F").strip().upper()
+        if mode == "AUTO":
+            mode = "F"  # "auto" isn't a real port mode -- not yet negotiated/down
+
         result.append({
-            "name":     iface,
-            "state":    (r.get("status") or r.get("oper_status") or "unknown").strip().lower(),
-            "mode":     (r.get("oper_mode") or r.get("admin_mode") or "F").strip().upper(),
-            "speed":    f"{speed_mbps // 1000}G" if speed_mbps else "--",
-            "vsan_id":  vsan,
-            "sfp":      (r.get("fcot_info") or "").strip().lower() not in ("absent", "--", ""),
+            "name":      iface,
+            "state":     state,
+            "mode":      mode,
+            "speed":     f"{speed_gbps}G" if speed_gbps else "--",
+            "vsan_id":   vsan,
+            "port_wwn":  (r.get("port_wwn") or "").strip().lower(),
+            "peer_wwn":  (r.get("peer_port_wwn") or "").strip().lower(),
+            "sfp":       bool((r.get("sfp") or "").strip()),
         })
     return result
 
